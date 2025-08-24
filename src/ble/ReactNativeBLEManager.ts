@@ -59,7 +59,7 @@ export class ReactNativeBLEManager extends BLEManager {
         const connectionManager = new ReactNativeBLEConnectionManager(keyPair, bleMgr);
 
         // Call parent constructor with v2.0 components
-        super(keyPair, advertiser as BLEAdvertiser, scanner as BLEScanner, connectionManager as BLEConnectionManager);
+        super(keyPair, advertiser as BLEAdvertiser, scanner as unknown as BLEScanner, connectionManager as BLEConnectionManager);
 
         // Store React Native specific references
         this.bleManager = bleMgr;

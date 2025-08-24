@@ -455,10 +455,10 @@ export const BLE_CONFIG = {
     },
 
     // Timing parameters (ms)
-    ADVERTISEMENT_INTERVAL: 1000,        // 1 second base interval
-    ADVERTISEMENT_RANDOMIZATION: 500,    // ±500ms randomization
-    SCAN_INTERVAL: 2000,                // 2 seconds
-    SCAN_WINDOW: 1800,                  // 1.8 seconds
+    ADVERTISEMENT_INTERVAL: 5000,        // 10 seconds base interval
+    ADVERTISEMENT_RANDOMIZATION: 1000,    // ±1 second randomization
+    SCAN_INTERVAL: 5000,                // 20 seconds
+    SCAN_WINDOW: 4500,                  // 18 seconds
     CONNECTION_TIMEOUT: 10000,           // 10 seconds
     AUTHENTICATION_TIMEOUT: 5000,        // 5 seconds
 

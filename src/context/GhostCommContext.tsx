@@ -19,6 +19,7 @@ import {
     NetworkStats
 } from '../../core';
 import { debug } from '../utils/debug';
+import { SimulatedNodeManager, simulationManager } from '../testing/SimulatedNodeManager';
 
 // System log for UI display
 export interface SystemLog {
@@ -79,11 +80,66 @@ interface GhostCommContextType {
 
 const GhostCommContext = createContext<GhostCommContextType | undefined>(undefined);
 
+// Create default/stub context value for development reloads
+const createStubContext = (): GhostCommContextType => ({
+    bleManager: null,
+    keyPair: null,
+    messages: [],
+    discoveredNodes: new Map(),
+    connectedNodes: new Map(),
+    networkStats: {
+        totalNodes: 0,
+        activeNodes: 0,
+        trustedNodes: 0,
+        blockedNodes: 0,
+        totalConnections: 0,
+        messagesSent: 0,
+        messagesReceived: 0,
+        messagesRelayed: 0,
+        messagesDropped: 0,
+        averageHopCount: 0,
+        averageLatency: 0,
+        deliverySuccessRate: 1,
+        networkDensity: 0,
+        networkReachability: 0,
+        bytesTransmitted: 0,
+        bytesReceived: 0,
+        averageThroughput: 0,
+        uptime: Date.now(),
+        lastUpdated: Date.now()
+    },
+    systemLogs: [],
+    isScanning: false,
+    isAdvertising: false,
+    isInitialized: false,
+    sendMessage: async () => { console.warn('Context not ready'); },
+    clearMessages: async () => { console.warn('Context not ready'); },
+    clearLogs: () => { console.warn('Context not ready'); },
+    startScanning: async () => { console.warn('Context not ready'); },
+    stopScanning: async () => { console.warn('Context not ready'); },
+    startAdvertising: async () => { console.warn('Context not ready'); },
+    stopAdvertising: async () => { console.warn('Context not ready'); },
+    connectToNode: async () => { console.warn('Context not ready'); },
+    disconnectFromNode: async () => { console.warn('Context not ready'); },
+    refreshNetwork: async () => { console.warn('Context not ready'); },
+    addSystemLog: () => { console.warn('Context not ready'); },
+    executeCommand: async () => 'Context not ready',
+    getNodeRoutingTable: () => undefined,
+    getMessageFlow: () => new Map()
+});
+
 export const useGhostComm = () => {
     const context = useContext(GhostCommContext);
+    
     if (!context) {
+        // During development hot reloads, provide safe fallback
+        if (__DEV__) {
+            console.warn('useGhostComm called outside provider, returning stub');
+            return createStubContext();
+        }
         throw new Error('useGhostComm must be used within GhostCommProvider');
     }
+    
     return context;
 };
 
@@ -96,6 +152,7 @@ const STORAGE_KEYS = {
 };
 
 export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+    const [isContextReady, setIsContextReady] = useState(false);
     const [bleManager, setBleManager] = useState<ReactNativeBLEManager | null>(null);
     const [keyPair, setKeyPair] = useState<IGhostKeyPair | null>(null);
     const [messages, setMessages] = useState<StoredMessage[]>([]);
@@ -500,10 +557,21 @@ export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         }
     }, [bleManager, isAdvertising, addSystemLog]);
 
-    const connectToNode = useCallback(async (nodeId: string) => {
+        const connectToNode = useCallback(async (nodeId: string) => {
+        // For simulated nodes, just update the state
+        if (nodeId.startsWith('SIM_') || nodeId.startsWith('ECHO_') || nodeId.startsWith('PATROL_') || nodeId.startsWith('SQUAD_')) {
+            const node = discoveredNodes.get(nodeId);
+            if (node) {
+                node.isConnected = true;
+                handleNodeConnected(nodeId);
+            }
+            return;
+        }
+        
+        // For real BLE nodes
         if (!bleManager) throw new Error('BLE not initialized');
         await bleManager.connectToNode(nodeId);
-    }, [bleManager]);
+    }, [bleManager, discoveredNodes, handleNodeConnected]);
 
     const disconnectFromNode = useCallback(async (nodeId: string) => {
         if (!bleManager) throw new Error('BLE not initialized');
@@ -523,26 +591,25 @@ export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     // Network mesh methods
     const getNodeRoutingTable = useCallback((nodeId: string): Map<string, string> | undefined => {
-        // This would normally query the routing table from the BLE manager
-        // For now, return a stub or undefined
         return routingTablesRef.current.get(nodeId);
     }, []);
 
     const getMessageFlow = useCallback((): Map<string, Map<string, number>> => {
-        // Return the current message flow data
         return new Map(messageFlowsRef.current);
     }, []);
 
     // Command execution implementation
+    // Command execution implementation
     const executeCommand = useCallback(async (command: string): Promise<string> => {
-        const parts = command.trim().toLowerCase().split(/\s+/);
-        const cmd = parts[0];
-        const args = parts.slice(1);
+    const parts = command.trim().split(/\s+/);
+    const cmd = parts[0].toLowerCase();
+    const args = parts.slice(1);
 
-        try {
-            switch (cmd) {
-                case 'help':
-                    return `
+    try {
+        switch (cmd) {
+            case 'help':
+            case '?':
+                return `
 NETWORK ─────────────────────────────────
   scan                Start BLE scanning
   stop                Stop scanning/advertising  
@@ -558,226 +625,554 @@ MESSAGING ───────────────────────�
   messages            Show message history
   clear-messages      Clear all messages
 
+SIMULATION ──────────────────────────────
+  simulate <n>        Create n simulated nodes
+  squad <size>        Deploy tactical squad
+  base                Create base network
+  convoy <size>       Deploy convoy formation
+  echo                Create echo responder
+  emergency           Activate emergency beacon
+  loopback <msg>      Test with loopback
+  stress <n> <m>      Stress test (n nodes, m msgs)
+  scenario <type>     Run preset scenarios
+  fragment            Simulate network split
+
 SYSTEM ──────────────────────────────────
   status              Show system status
   stats               Network statistics
   logs                Show recent logs
   clear-logs          Clear system logs
   identity            Show node identity
-  alias <n>        Set node alias
+  alias <name>        Set node alias
   export              Export keypair
   ping <id>           Ping a node
   test                Run diagnostics
+  mesh                Show mesh topology
   clear               Clear terminal
-  
-Type command or use ? for quick guide`;
 
-                case 'scan':
-                    if (isScanning) {
-                        return '⚠ Already scanning';
+Type 'help' or '?' for this guide`;
+
+            case 'simulate':
+            case 'sim':
+                const simCount = parseInt(args[0]) || 1;
+                const simNodes = [];
+                
+                for (let i = 0; i < simCount; i++) {
+                    const node = simulationManager.createSimulatedNode({
+                        profile: {
+                            type: 'patrol',
+                            movement: 'mobile',
+                            responsePattern: 'tactical',
+                            batteryDrain: 0.1
+                        },
+                        autoRespond: true
+                    });
+                    simNodes.push(node);
+                    handleNodeDiscovered(node);
+                }
+                
+                return `✓ Deployed ${simCount} tactical node(s):\n${simNodes.map(n => {
+                    const signal = n.rssi > -60 ? 'STRONG' : n.rssi > -75 ? 'MEDIUM' : 'WEAK';
+                    return `  • ${n.name} [${signal}] ${n.rssi.toFixed(0)}dBm`;
+                }).join('\n')}`;
+
+            case 'squad':
+                const squadSize = parseInt(args[0]) || 5;
+                const squadNodes = simulationManager.createTacticalSquad(squadSize);
+                squadNodes.forEach(node => handleNodeDiscovered(node));
+                
+                return `✓ TACTICAL SQUAD DEPLOYED
+  • Size: ${squadSize} units
+  • Leader: ${squadNodes[0].name}
+  • Formation: Active
+◉ Squad is operational`;
+
+            case 'base':
+                const baseNodes = simulationManager.createBaseNetwork();
+                baseNodes.forEach(node => handleNodeDiscovered(node));
+                
+                return `✓ BASE NETWORK ESTABLISHED
+  • Main: ${baseNodes[0].name}
+  • Relays: ${baseNodes.length - 1} stations
+◉ Network infrastructure online`;
+
+            case 'convoy':
+                const convoySize = parseInt(args[0]) || 4;
+                const convoyNodes = [];
+                
+                for (let i = 0; i < convoySize; i++) {
+                    const node = simulationManager.createSimulatedNode({
+                        name: `CONVOY-${300 + i}`,
+                        profile: {
+                            type: 'convoy',
+                            movement: 'mobile',
+                            responsePattern: 'tactical',
+                            batteryDrain: 0.15
+                        },
+                        autoRespond: true
+                    });
+                    convoyNodes.push(node);
+                    handleNodeDiscovered(node);
+                }
+                
+                // Start convoy movement
+                simulationManager.simulateConvoyMovement('convoy', 2);
+                
+                return `✓ CONVOY DEPLOYED
+  • Vehicles: ${convoySize}
+  • Lead: ${convoyNodes[0].name}
+  • Status: Mobile
+◉ Convoy in motion...`;
+
+            case 'emergency':
+            case 'sos':
+                const beacon = simulationManager.createEmergencyBeacon(true);
+                handleNodeDiscovered(beacon);
+                
+                // Send emergency broadcasts
+                let sosCount = 0;
+                const sosInterval = setInterval(() => {
+                    handleMessageReceived({
+                        content: `EMERGENCY: Unit requires immediate assistance! GPS: Unknown [${sosCount + 1}/5]`,
+                        type: MessageType.BROADCAST
+                    }, beacon.id);
+                    
+                    sosCount++;
+                    if (sosCount >= 5) {
+                        clearInterval(sosInterval);
+                        addSystemLog('WARN', 'Emergency broadcast sequence complete');
                     }
-                    await startScanning();
-                    return '✓ Scanning started\n◉ Discovering nearby nodes...';
+                }, 2000);
+                
+                return `⚠ EMERGENCY BEACON ACTIVATED
+  • Callsign: ${beacon.name}
+  • Signal: ${beacon.rssi}dBm
+  • Battery: ${beacon.batteryLevel}%
+◉ Broadcasting distress signal...`;
 
-                case 'stop':
-                    if (isScanning) await stopScanning();
-                    if (isAdvertising) await stopAdvertising();
-                    return '✓ All operations stopped';
+            case 'echo':
+                const echoNode = simulationManager.createSimulatedNode({
+                    name: `ECHO-${Math.floor(100 + Math.random() * 900)}`,
+                    rssi: -55,
+                    profile: {
+                        type: 'relay',
+                        movement: 'static',
+                        responsePattern: 'echo',
+                        batteryDrain: 0.05
+                    },
+                    autoRespond: true
+                });
+                
+                handleNodeDiscovered(echoNode);
+                
+                setTimeout(() => {
+                    handleNodeConnected(echoNode.id);
+                    addSystemLog('SUCCESS', `${echoNode.name} online and responding`);
+                }, 1000);
+                
+                return `✓ Echo station ${echoNode.name} deployed
+◉ Auto-connect in 1 second...`;
 
-                case 'beacon':
-                case 'advertise':
-                    if (isAdvertising) {
-                        return '⚠ Already advertising';
+            case 'connect':
+            if (args.length === 0) {
+                return '⚠ Usage: connect <node_id or partial_name>';
+            }
+            
+            const searchTerm = args.join(' ').toLowerCase();
+            let targetNode: BLENode | undefined;
+            
+            // Search by partial ID or name
+            discoveredNodes.forEach(node => {
+                if (node.id.toLowerCase().includes(searchTerm) || 
+                    node.name.toLowerCase().includes(searchTerm)) {
+                    targetNode = node;
+                }
+            });
+            
+            if (!targetNode) {
+                return `⚠ Node not found: ${searchTerm}`;
+            }
+            
+            if (connectedNodes.has(targetNode.id)) {
+                return `⚠ Already connected to ${targetNode.name}`;
+            }
+            
+            // For simulated nodes, just update the state directly
+            targetNode.isConnected = true;
+            setConnectedNodes(prev => {
+                const updated = new Map(prev);
+                if (targetNode) {
+                    updated.set(targetNode.id, targetNode);
+                }
+                return updated;
+            });
+            
+            addSystemLog('SUCCESS', `Connected to ${targetNode.name}`);
+            
+            return `✓ Connected to ${targetNode.name}
+        • Signal: ${targetNode.rssi}dBm
+        • Battery: ${targetNode.batteryLevel}%`;
+
+            case 'disconnect':
+                if (args.length === 0) {
+                    return '⚠ Usage: disconnect <node_id or partial_name>';
+                }
+                
+                const disconnectSearch = args.join(' ').toLowerCase();
+                let disconnectTarget: BLENode | undefined;
+                
+                connectedNodes.forEach(node => {
+                    if (node.id.toLowerCase().includes(disconnectSearch) || 
+                        node.name.toLowerCase().includes(disconnectSearch)) {
+                        disconnectTarget = node;
                     }
-                    await startAdvertising();
-                    return '✓ Beacon active\n◉ Broadcasting presence...';
+                });
+                
+                if (!disconnectTarget) {
+                    return `⚠ Not connected to: ${disconnectSearch}`;
+                }
+                
+                await disconnectFromNode(disconnectTarget.id);
+                handleNodeDisconnected(disconnectTarget.id);
+                
+                return `✓ Disconnected from ${disconnectTarget.name}`;
 
-                case 'nodes':
-                    if (discoveredNodes.size === 0) {
-                        return '⚠ No nodes discovered\n→ Run "scan" to discover nodes';
+            case 'ping':
+                if (args.length === 0) {
+                    return '⚠ Usage: ping <node_id or partial_name>';
+                }
+                
+                const pingSearch = args.join(' ').toLowerCase();
+                let pingTarget: BLENode | undefined;
+                
+                connectedNodes.forEach(node => {
+                    if (node.id.toLowerCase().includes(pingSearch) || 
+                        node.name.toLowerCase().includes(pingSearch)) {
+                        pingTarget = node;
                     }
-                    let nodeList = 'DISCOVERED NODES\n\n';
-                    discoveredNodes.forEach((node, id) => {
-                        const connected = connectedNodes.has(id);
-                        const status = connected ? '● ' : '○ ';
-                        const rssi = node.lastRSSI || -100;
-                        const signal = rssi > -60 ? '▰▰▰▰' : rssi > -70 ? '▰▰▰▱' : rssi > -80 ? '▰▰▱▱' : '▰▱▱▱';
-                        nodeList += `${status}${id.substring(0, 8)}...  ${signal} ${rssi}dBm\n`;
-                        if (connected) {
-                            nodeList += `  └─ Connected · ${node.deviceType || 'Unknown'}\n`;
+                });
+                
+                if (!pingTarget) {
+                    return `⚠ Not connected to: ${pingSearch}`;
+                }
+                
+                const pingStart = Date.now();
+                await sendMessage('PING', pingTarget.id, MessageType.DIRECT);
+                
+                // Simulate response
+                setTimeout(() => {
+                    const responseTime = Date.now() - pingStart;
+                    handleMessageReceived({
+                        content: `PONG - Response time: ${responseTime}ms`,
+                        type: MessageType.DIRECT
+                    }, pingTarget!.id);
+                }, 100 + Math.random() * 200);
+                
+                return `✓ Ping sent to ${pingTarget.name}`;
+
+            case 'dm':
+            case 'direct':
+                if (args.length < 2) {
+                    return '⚠ Usage: dm <node_name> <message>';
+                }
+                
+                const dmSearch = args[0].toLowerCase();
+                const dmMessage = args.slice(1).join(' ');
+                let dmTarget: BLENode | undefined;
+                
+                discoveredNodes.forEach(node => {
+                    if (node.name.toLowerCase().includes(dmSearch)) {
+                        dmTarget = node;
+                    }
+                });
+                
+                if (!dmTarget) {
+                    return `⚠ Node not found: ${dmSearch}`;
+                }
+                
+                await sendMessage(dmMessage, dmTarget.id, MessageType.DIRECT);
+                
+                // Simulate response if node has auto-respond
+                const response = simulationManager.handleMessage(dmTarget.id, dmMessage);
+                if (response) {
+                    setTimeout(() => {
+                        handleMessageReceived({
+                            content: response,
+                            type: MessageType.DIRECT
+                        }, dmTarget!.id);
+                    }, 500 + Math.random() * 1000);
+                }
+                
+                return `✓ Message sent to ${dmTarget.name}: "${dmMessage}"`;
+
+            case 'send':
+            case 'broadcast':
+                if (args.length === 0) {
+                    return '⚠ Usage: send <message>';
+                }
+                
+                const broadcastMsg = args.join(' ');
+                await sendMessage(broadcastMsg, undefined, MessageType.BROADCAST);
+                
+                // Simulate responses from auto-responding nodes
+                discoveredNodes.forEach(node => {
+                    const response = simulationManager.handleMessage(node.id, broadcastMsg);
+                    if (response && Math.random() > 0.5) {
+                        setTimeout(() => {
+                            handleMessageReceived({
+                                content: response,
+                                type: MessageType.BROADCAST
+                            }, node.id);
+                        }, 500 + Math.random() * 2000);
+                    }
+                });
+                
+                return `✓ Broadcasting: "${broadcastMsg}"`;
+
+            case 'fragment':
+                const groupASize = parseInt(args[0]) || 3;
+                const groupBSize = parseInt(args[1]) || 3;
+                
+                const allNodes = Array.from(discoveredNodes.keys());
+                const groupA = allNodes.slice(0, groupASize);
+                const groupB = allNodes.slice(groupASize, groupASize + groupBSize);
+                
+                simulationManager.simulateNetworkSplit(groupA, groupB);
+                
+                return `✓ NETWORK FRAGMENTATION SIMULATED
+  • Group A: ${groupA.length} nodes
+  • Group B: ${groupB.length} nodes
+◉ Groups are now isolated`;
+
+            case 'stress':
+                const nodeCount = parseInt(args[0]) || 5;
+                const messageCount = parseInt(args[1]) || 10;
+                const duration = parseInt(args[2]) || 5000;
+                
+                // Create stress test nodes
+                const stressNodes: any[] = [];
+                for (let i = 0; i < nodeCount; i++) {
+                    const node = simulationManager.createSimulatedNode({
+                        name: `STRESS-${400 + i}`,
+                        profile: {
+                            type: 'patrol',
+                            movement: 'random',
+                            responsePattern: 'tactical',
+                            batteryDrain: 0.2
+                        },
+                        autoRespond: true
+                    });
+                    stressNodes.push(node);
+                    handleNodeDiscovered(node);
+                }
+                
+                // Generate message traffic
+                let msgSent = 0;
+                const messageInterval = duration / messageCount;
+                const stressInterval = setInterval(() => {
+                    const fromNode = stressNodes[Math.floor(Math.random() * stressNodes.length)];
+                    const messageTypes = [
+                        'Status report: Sector clear',
+                        'Position: Grid reference updated',
+                        'Request: Ammunition resupply',
+                        'Alert: Hostile contact',
+                        'Confirm: Objective achieved'
+                    ];
+                    
+                    handleMessageReceived({
+                        content: messageTypes[Math.floor(Math.random() * messageTypes.length)],
+                        type: Math.random() > 0.7 ? MessageType.BROADCAST : MessageType.DIRECT
+                    }, fromNode.id);
+                    
+                    msgSent++;
+                    if (msgSent >= messageCount) {
+                        clearInterval(stressInterval);
+                        addSystemLog('SUCCESS', `Stress test complete: ${msgSent} messages`);
+                    }
+                }, messageInterval);
+                
+                return `✓ STRESS TEST INITIATED
+  • Nodes: ${nodeCount}
+  • Messages: ${messageCount}
+  • Duration: ${duration}ms
+  • Rate: ${(1000/messageInterval).toFixed(1)} msg/sec
+◉ Test running...`;
+
+            case 'scenario':
+                const scenarioType = args[0] || 'list';
+                
+                switch (scenarioType) {
+                    case 'patrol':
+                        const patrolSquad = simulationManager.createTacticalSquad(3);
+                        patrolSquad.forEach(node => handleNodeDiscovered(node));
+                        
+                        // Simulate patrol messages
+                        let patrolMsg = 0;
+                        const patrolInterval = setInterval(() => {
+                            const messages = [
+                                'Checkpoint Alpha secure',
+                                'Moving to next waypoint',
+                                'No hostile activity detected',
+                                'Patrol route 50% complete'
+                            ];
+                            
+                            handleMessageReceived({
+                                content: messages[patrolMsg % messages.length],
+                                type: MessageType.BROADCAST
+                            }, patrolSquad[0].id);
+                            
+                            patrolMsg++;
+                            if (patrolMsg >= 10) {
+                                clearInterval(patrolInterval);
+                            }
+                        }, 3000);
+                        
+                        return `✓ PATROL SCENARIO ACTIVE
+  • Squad: ${patrolSquad.map(n => n.name).join(', ')}
+  • Pattern: Standard patrol
+  • Duration: 30 seconds`;
+
+                    case 'combat':
+                        // Create opposing forces
+                        const friendlies = simulationManager.createTacticalSquad(4);
+                        const hostiles = [];
+                        
+                        for (let i = 0; i < 3; i++) {
+                            const hostile = simulationManager.createSimulatedNode({
+                                name: `HOSTILE-${i + 1}`,
+                                profile: {
+                                    type: 'patrol',
+                                    movement: 'random',
+                                    responsePattern: 'silent',
+                                    batteryDrain: 0.3
+                                }
+                            });
+                            hostiles.push(hostile);
                         }
+                        
+                        [...friendlies, ...hostiles].forEach(node => handleNodeDiscovered(node));
+                        
+                        // Simulate combat messages
+                        let combatRound = 0;
+                        const combatInterval = setInterval(() => {
+                            const combatMessages = [
+                                'Contact! Hostile forces engaged',
+                                'Taking fire from north position',
+                                'Returning fire, suppressing enemy',
+                                'Request immediate backup',
+                                'Enemy neutralized, area secure'
+                            ];
+                            
+                            const sender = friendlies[Math.floor(Math.random() * friendlies.length)];
+                            handleMessageReceived({
+                                content: combatMessages[Math.min(combatRound, combatMessages.length - 1)],
+                                type: MessageType.BROADCAST
+                            }, sender.id);
+                            
+                            combatRound++;
+                            if (combatRound >= 8) {
+                                clearInterval(combatInterval);
+                                addSystemLog('SUCCESS', 'Combat scenario complete');
+                            }
+                        }, 2000);
+                        
+                        return `⚠ COMBAT SCENARIO INITIATED
+  • Friendlies: ${friendlies.length} units
+  • Hostiles: ${hostiles.length} detected
+  • Status: ENGAGED
+◉ Combat in progress...`;
+
+                    case 'list':
+                    default:
+                        return `Available scenarios:
+  • patrol    - Mobile patrol simulation
+  • combat    - Combat engagement
+  • emergency - Distress beacon
+  • convoy    - Vehicle convoy
+  
+Usage: scenario <type>`;
+                }
+
+            case 'loopback':
+            case 'loop':
+                const loopbackMsg = args.join(' ') || 'Loopback test message';
+                
+                setTimeout(() => {
+                    handleMessageReceived({
+                        content: `[LOOPBACK] ${loopbackMsg}`,
+                        type: MessageType.DIRECT
+                    }, keyPair?.getFingerprint());
+                }, 500);
+                
+                return `✓ Loopback initiated: "${loopbackMsg}"
+◉ Message will return in 500ms...`;
+
+            case 'mesh':
+            case 'topology':
+            case 'topo':
+                const stats = simulationManager.getNetworkStatistics();
+                const nodes = Array.from(discoveredNodes.values());
+                const connected = Array.from(connectedNodes.values());
+                
+                let output = 'TACTICAL MESH TOPOLOGY\n';
+                output += '═'.repeat(40) + '\n\n';
+                output += `LOCAL NODE [${alias.toUpperCase()}]\n`;
+                output += `└─ ID: ${keyPair?.getFingerprint().substring(0, 12)}...\n\n`;
+                
+                if (connected.length > 0) {
+                    output += 'CONNECTED UNITS:\n';
+                    connected.forEach(node => {
+                        const signal = node.rssi > -60 ? '████' : 
+                                      node.rssi > -70 ? '███░' : 
+                                      node.rssi > -80 ? '██░░' : '█░░░';
+                        const battery = node.batteryLevel ? ` [${Math.round(node.batteryLevel)}%]` : '';
+                        output += `  ${signal} ${node.name}${battery}\n`;
+                        output += `      └─ ${node.rssi.toFixed(0)}dBm · ${node.deviceType}\n`;
                     });
-                    return nodeList;
-
-                case 'connect':
-                    if (args.length === 0) {
-                        return '⚠ Usage: connect <node_id>';
-                    }
-                    const connectId = args[0];
-                    const nodeToConnect = Array.from(discoveredNodes.keys())
-                        .find(id => id.toLowerCase().startsWith(connectId.toLowerCase()));
-
-                    if (!nodeToConnect) {
-                        return `⚠ Node not found: ${connectId}`;
-                    }
-
-                    if (connectedNodes.has(nodeToConnect)) {
-                        return `⚠ Already connected to ${nodeToConnect.substring(0, 8)}...`;
-                    }
-
-                    await connectToNode(nodeToConnect);
-                    return `✓ Connected to ${nodeToConnect.substring(0, 8)}...`;
-
-                case 'disconnect':
-                    if (args.length === 0) {
-                        return '⚠ Usage: disconnect <node_id>';
-                    }
-                    const disconnectId = args[0];
-                    const nodeToDisconnect = Array.from(connectedNodes.keys())
-                        .find(id => id.toLowerCase().startsWith(disconnectId.toLowerCase()));
-
-                    if (!nodeToDisconnect) {
-                        return `⚠ Not connected to: ${disconnectId}`;
-                    }
-
-                    await disconnectFromNode(nodeToDisconnect);
-                    return `✓ Disconnected from ${nodeToDisconnect.substring(0, 8)}...`;
-
-                case 'refresh':
-                    await refreshNetwork();
-                    return '✓ Network refreshed\n◉ Rediscovering nodes...';
-
-                case 'send':
-                case 'broadcast':
-                    if (args.length === 0) {
-                        return '⚠ Usage: send <message>';
-                    }
-                    const broadcastMsg = args.join(' ');
-                    await sendMessage(broadcastMsg, undefined, MessageType.BROADCAST);
-                    return `✓ Broadcasting: "${broadcastMsg}"`;
-
-                case 'dm':
-                case 'direct':
-                    if (args.length < 2) {
-                        return '⚠ Usage: dm <node_id> <message>';
-                    }
-                    const dmNodeId = args[0];
-                    const dmMsg = args.slice(1).join(' ');
-                    const dmTarget = Array.from(connectedNodes.keys())
-                        .find(id => id.toLowerCase().startsWith(dmNodeId.toLowerCase()));
-
-                    if (!dmTarget) {
-                        return `⚠ Not connected to: ${dmNodeId}`;
-                    }
-
-                    await sendMessage(dmMsg, dmTarget, MessageType.DIRECT);
-                    return `✓ Sent to ${dmTarget.substring(0, 8)}...: "${dmMsg}"`;
-
-                case 'messages':
-                case 'msgs':
-                    if (messages.length === 0) {
-                        return '⚠ No messages';
-                    }
-                    let msgList = 'MESSAGE HISTORY\n\n';
-                    messages.slice(-10).forEach(msg => {
-                        const time = new Date(msg.timestamp).toLocaleTimeString('en-US', {
-                            hour12: false,
-                            hour: '2-digit',
-                            minute: '2-digit'
-                        });
-                        const direction = msg.isIncoming ? '←' : '→';
-                        const status = msg.status === 'DELIVERED' ? '✓' :
-                            msg.status === 'SENT' ? '→' :
-                                msg.status === 'FAILED' ? '✗' : '◉';
-                        msgList += `[${time}] ${direction} ${status} ${msg.content}\n`;
+                }
+                
+                const unconnected = nodes.filter(n => !connectedNodes.has(n.id));
+                if (unconnected.length > 0) {
+                    output += '\nIN RANGE (Unconnected):\n';
+                    unconnected.slice(0, 10).forEach(node => {
+                        output += `  ○ ${node.name} (${node.rssi.toFixed(0)}dBm)\n`;
                     });
-                    return msgList;
-
-                case 'clear-messages':
-                    await clearMessages();
-                    return '✓ Messages cleared';
-
-                case 'status':
-                    const nodeId = keyPair?.getFingerprint() || 'Unknown';
-                    const uptime = Math.floor((Date.now() - networkStats.uptime) / 1000);
-                    const hours = Math.floor(uptime / 3600);
-                    const minutes = Math.floor((uptime % 3600) / 60);
-                    const seconds = uptime % 60;
-
-                    return `
-SYSTEM STATUS
-
-Node ID    ${nodeId.substring(0, 16)}...
-Alias      ${alias}
-Uptime     ${hours}h ${minutes}m ${seconds}s
-
-NETWORK
-  Scanning     ${isScanning ? '● Active' : '○ Inactive'}
-  Advertising  ${isAdvertising ? '● Active' : '○ Inactive'}
-  Discovered   ${discoveredNodes.size} nodes
-  Connected    ${connectedNodes.size} nodes
-
-MESSAGES
-  Sent         ${networkStats.messagesSent}
-  Received     ${networkStats.messagesReceived}
-  Relayed      ${networkStats.messagesRelayed}
-  Dropped      ${networkStats.messagesDropped}
-
-DATA TRANSFER
-  TX           ${(networkStats.bytesTransmitted / 1024).toFixed(2)} KB
-  RX           ${(networkStats.bytesReceived / 1024).toFixed(2)} KB`;
-
-                case 'stats':
-                    return `
-NETWORK STATISTICS
-
-Nodes
-  Total        ${networkStats.totalNodes}
-  Active       ${networkStats.activeNodes}
-  Trusted      ${networkStats.trustedNodes}
-  Blocked      ${networkStats.blockedNodes}
-
-Messages
-  Sent         ${networkStats.messagesSent}
-  Received     ${networkStats.messagesReceived}
-  Relayed      ${networkStats.messagesRelayed}
-  Dropped      ${networkStats.messagesDropped}
-
-Performance
-  Delivery     ${(networkStats.deliverySuccessRate * 100).toFixed(1)}%
-  Avg Hops     ${networkStats.averageHopCount.toFixed(1)}
-  Avg Latency  ${networkStats.averageLatency.toFixed(0)}ms
-  Density      ${(networkStats.networkDensity * 100).toFixed(1)}%
-  Reach        ${(networkStats.networkReachability * 100).toFixed(1)}%
-
-Data Transfer
-  TX           ${(networkStats.bytesTransmitted / 1024).toFixed(2)} KB
-  RX           ${(networkStats.bytesReceived / 1024).toFixed(2)} KB
-  Throughput   ${networkStats.averageThroughput.toFixed(2)} KB/s`;
-
-                case 'logs':
-                    if (systemLogs.length === 0) {
-                        return '⚠ No logs';
+                    if (unconnected.length > 10) {
+                        output += `  ... and ${unconnected.length - 10} more\n`;
                     }
-                    let logOutput = 'SYSTEM LOGS\n\n';
-                    systemLogs.slice(-20).forEach(log => {
-                        const time = new Date(log.timestamp).toLocaleTimeString('en-US', {
-                            hour12: false,
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit'
-                        });
-                        const levelIcon = log.level === 'ERROR' ? '✗' :
-                            log.level === 'WARN' ? '⚠' :
-                                log.level === 'SUCCESS' ? '✓' :
-                                    log.level === 'DEBUG' ? '◆' : '•';
-                        logOutput += `${time} ${levelIcon} ${log.message}\n`;
-                    });
-                    return logOutput;
+                }
+                
+                output += '\n' + '─'.repeat(40);
+                output += `\nNetwork: ${nodes.length} nodes · ${connected.length} connected`;
+                output += `\nAvg Signal: ${stats.averageRSSI.toFixed(0)}dBm · Avg Battery: ${stats.averageBattery.toFixed(0)}%`;
+                
+                return output;
 
-                case 'clear-logs':
-                    clearLogs();
-                    return '✓ Logs cleared';
+            case 'stats':
+                const netStats = simulationManager.getNetworkStatistics();
+                const uptime = Date.now() - networkStats.uptime;
+                const hours = Math.floor(uptime / (1000 * 60 * 60));
+                const minutes = Math.floor((uptime % (1000 * 60 * 60)) / (1000 * 60));
+                const seconds = Math.floor((uptime % (1000 * 60)) / 1000);
+                return `
+    SYSTEM STATUS
+
+    Node ID    ${keyPair?.getFingerprint().substring(0, 16) || 'Unknown'}...
+    Alias      ${alias}
+    Uptime     ${hours}h ${minutes}m ${seconds}s
+
+    NETWORK
+    Scanning     ${isScanning ? '● Active' : '○ Inactive'}
+    Advertising  ${isAdvertising ? '● Active' : '○ Inactive'}
+    Discovered   ${discoveredNodes.size} nodes
+    Connected    ${connectedNodes.size} nodes
+
+    SIMULATION
+    Active Nodes ${simulationManager.getSimulatedNodes().length}
+    
+    MESSAGES
+    Sent         ${networkStats.messagesSent}
+    Received     ${networkStats.messagesReceived}`;
 
                 case 'identity':
                 case 'id':
@@ -785,18 +1180,12 @@ Data Transfer
                         return '⚠ No identity loaded';
                     }
                     const fingerprint = keyPair.getFingerprint();
-                    const publicKey = keyPair.exportKeys().publicKey;
                     return `
-NODE IDENTITY
+    NODE IDENTITY
 
-Fingerprint  ${fingerprint}
-Alias        ${alias}
-
-Public Key (Ed25519)
-${publicKey.substring(0, 32)}
-${publicKey.substring(32, 64)}
-${publicKey.substring(64, 96)}
-${publicKey.substring(96, 128)}`;
+    Fingerprint  ${fingerprint}
+    Alias        ${alias}
+    Protocol     v2.0`;
 
                 case 'alias':
                     if (args.length === 0) {
@@ -813,27 +1202,11 @@ ${publicKey.substring(96, 128)}`;
                     }
                     const exported = keyPair.exportKeys();
                     return `
-EXPORTED KEYPAIR
-⚠ Keep this private and secure!
+    EXPORTED KEYPAIR
+    ⚠ Keep this private and secure!
 
-${JSON.stringify(exported, null, 2)}`;
-
-                case 'ping':
-                    if (args.length === 0) {
-                        return '⚠ Usage: ping <node_id>';
-                    }
-                    const pingTarget = args[0];
-                    const pingNode = Array.from(connectedNodes.keys())
-                        .find(id => id.toLowerCase().startsWith(pingTarget.toLowerCase()));
-
-                    if (!pingNode) {
-                        return `⚠ Not connected to: ${pingTarget}`;
-                    }
-
-                    const pingStart = Date.now();
-                    await sendMessage('PING', pingNode, MessageType.DIRECT);
-                    const pingTime = Date.now() - pingStart;
-                    return `✓ Ping to ${pingNode.substring(0, 8)}...: ${pingTime}ms`;
+    Fingerprint: ${keyPair.getFingerprint()}
+    Public Key: ${exported.publicKey.substring(0, 64)}...`;
 
                 case 'test':
                 case 'diagnostic':
@@ -842,51 +1215,29 @@ ${JSON.stringify(exported, null, 2)}`;
                     testOutput += 'BLE Manager      ' + (bleManager ? '✓ OK' : '✗ FAILED') + '\n';
                     testOutput += 'KeyPair          ' + (keyPair ? '✓ OK' : '✗ FAILED') + '\n';
                     testOutput += 'Network          ' + (discoveredNodes.size > 0 ? '✓ OK' : '⚠ No nodes') + '\n';
-                    testOutput += 'Storage          ✓ OK\n';
-                    testOutput += 'Crypto           ✓ OK\n';
+                    testOutput += 'Simulation       ' + (simulationManager.getSimulatedNodes().length > 0 ? '✓ Active' : '○ Inactive') + '\n';
                     testOutput += '\nDiagnostics complete';
                     return testOutput;
 
                 case 'clear':
                 case 'cls':
-                    // Terminal screen will handle clearing
                     return '\x1b[2J\x1b[H';
 
-                case 'exit':
-                case 'quit':
-                    return '✓ Goodbye';
-
-                case 'version':
-                case 'ver':
-                    return `
-GhostComm v2.0.0
-Protocol: Binary Packet v2
-Encryption: XChaCha20-Poly1305
-Signatures: Ed25519
-Key Exchange: X25519`;
-
-                case 'debug':
-                    const debugMode = args[0] === 'on' || args[0] === 'true';
-                    if (debugMode) {
-                        addSystemLog('DEBUG', 'Debug mode enabled');
-                        return '✓ Debug mode ON';
-                    } else {
-                        return '✓ Debug mode OFF';
-                    }
-
                 default:
-                    return `⚠ Unknown command: ${cmd}\n→ Type "help" for available commands`;
+                    return `⚠ Unknown command: ${cmd}
+    → Type "help" for available commands`;
             }
         } catch (error: any) {
             addSystemLog('ERROR', `Command failed: ${cmd}`, error);
             return `✗ Error: ${error.message || 'Command execution failed'}`;
         }
     }, [
-        isScanning, isAdvertising, discoveredNodes, connectedNodes, messages,
-        networkStats, systemLogs, keyPair, alias, bleManager,
+        isScanning, isAdvertising, discoveredNodes, connectedNodes, messages, systemLogs,
+        networkStats, keyPair, alias, bleManager,
         startScanning, stopScanning, startAdvertising, stopAdvertising,
-        connectToNode, disconnectFromNode, refreshNetwork, sendMessage,
-        clearMessages, clearLogs, addSystemLog
+        connectToNode, disconnectFromNode, sendMessage, clearMessages, clearLogs,
+        addSystemLog, handleNodeDiscovered, handleNodeConnected, handleNodeDisconnected, 
+        handleMessageReceived, setAlias
     ]);
 
     // Initialize BLE and load stored data
@@ -944,9 +1295,11 @@ Key Exchange: X25519`;
                 await loadStoredData();
 
                 setIsInitialized(true);
+                setIsContextReady(true);
                 addSystemLog('SUCCESS', 'GhostComm ready');
 
             } catch (error) {
+                setIsContextReady(true); // Set even on error to prevent hang
                 addSystemLog('ERROR', 'Failed to initialize', error);
                 debug.error('Initialization failed', error);
             }
@@ -1009,6 +1362,11 @@ Key Exchange: X25519`;
         getNodeRoutingTable,
         getMessageFlow
     };
+
+    // Don't render children until context is ready
+    if (!isContextReady) {
+        return null; // Or you could return a loading component here
+    }
 
     return (
         <GhostCommContext.Provider value={value}>

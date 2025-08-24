@@ -77,7 +77,7 @@ export abstract class BLEAdvertiser {
     // Rate limiting
     private advertisementCount: number = 0;
     private rateLimitWindow: number = 60000; // 1 minute
-    private maxAdvertisementsPerWindow: number = 60;
+    private maxAdvertisementsPerWindow: number = 30; // Reduced from 60 to prevent spam
 
     // Performance tracking
     private statistics = {
@@ -247,7 +247,7 @@ export abstract class BLEAdvertiser {
         }
 
         try {
-            console.log('🔄 Updating advertisement data');
+            console.log(`🔄 Updated advertisement (sequence: ${data.sequenceNumber || this.sequenceNumber})`);
 
             // Validate and enhance new data
             this.validateAdvertisementData(data);
@@ -645,19 +645,16 @@ export abstract class BLEAdvertiser {
     }
 
     /**
-     * Start periodic advertising
+     * Start periodic advertising - FIXED VERSION
      */
     private startPeriodicAdvertising(): void {
         // Clear existing timer
         this.stopPeriodicAdvertising();
 
-        // Calculate interval with randomization
-        const interval = this.advertisementInterval +
-            (Math.random() * BLE_CONFIG.ADVERTISEMENT_RANDOMIZATION - BLE_CONFIG.ADVERTISEMENT_RANDOMIZATION / 2);
-
-        this.advertisementTimer = setTimeout(() => {
-            this.performPeriodicAdvertisement();
-        }, interval);
+        // Use setInterval for consistent periodic updates
+        this.advertisementTimer = setInterval(async () => {
+            await this.performPeriodicAdvertisement();
+        }, this.advertisementInterval);
     }
 
     /**
@@ -665,13 +662,13 @@ export abstract class BLEAdvertiser {
      */
     private stopPeriodicAdvertising(): void {
         if (this.advertisementTimer) {
-            clearTimeout(this.advertisementTimer);
+            clearInterval(this.advertisementTimer); // Changed from clearTimeout
             this.advertisementTimer = undefined;
         }
     }
 
     /**
-     * Perform periodic advertisement update
+     * Perform periodic advertisement update - FIXED VERSION
      */
     private async performPeriodicAdvertisement(): Promise<void> {
         if (!this.isAdvertising || this.isPaused) {
@@ -705,10 +702,8 @@ export abstract class BLEAdvertiser {
         } catch (error) {
             console.error('❌ Periodic advertisement failed:', error);
             this.statistics.failedAdvertisements++;
-        } finally {
-            // Schedule next advertisement
-            this.startPeriodicAdvertising();
         }
+        // Removed the finally block that was causing recursive timer creation
     }
 
     /**

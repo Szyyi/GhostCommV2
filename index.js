@@ -4,163 +4,69 @@
  */
 
 // ============================================================================
-// CRITICAL: Fix crypto BEFORE noble libraries load
+// CRITICAL: Polyfills MUST be imported BEFORE anything else
 // ============================================================================
 
-// Create global crypto object
-if (!global.crypto) {
-    global.crypto = {};
-}
+// Step 1: Import crypto polyfill FIRST
+import 'react-native-get-random-values';
 
-// Install our getRandomValues implementation
-global.crypto.getRandomValues = function (buffer) {
-    const timestamp = Date.now();
-    const random = Math.random;
-
-    if (buffer instanceof Uint8Array || buffer instanceof Uint8ClampedArray) {
-        for (let i = 0; i < buffer.length; i++) {
-            buffer[i] = Math.floor((random() * timestamp * (i + 1)) % 256);
-        }
-    } else if (buffer instanceof Uint16Array) {
-        for (let i = 0; i < buffer.length; i++) {
-            buffer[i] = Math.floor((random() * timestamp * (i + 1)) % 65536);
-        }
-    } else if (buffer instanceof Uint32Array) {
-        for (let i = 0; i < buffer.length; i++) {
-            buffer[i] = Math.floor((random() * timestamp * (i + 1)) % 4294967296);
-        }
-    } else if (buffer instanceof Int8Array) {
-        for (let i = 0; i < buffer.length; i++) {
-            buffer[i] = Math.floor((random() * timestamp * (i + 1)) % 128) - 64;
-        }
-    } else if (buffer instanceof Int16Array) {
-        for (let i = 0; i < buffer.length; i++) {
-            buffer[i] = Math.floor((random() * timestamp * (i + 1)) % 32768) - 16384;
-        }
-    } else if (buffer instanceof Int32Array) {
-        for (let i = 0; i < buffer.length; i++) {
-            buffer[i] = Math.floor((random() * timestamp * (i + 1)) % 2147483648) - 1073741824;
-        }
-    }
-
-    return buffer;
-};
-
-// Also create webcrypto for noble libraries
-global.crypto.web = global.crypto;
-global.crypto.node = global.crypto;
-
-// Create a fake subtle API (noble might check for it)
-if (!global.crypto.subtle) {
-    global.crypto.subtle = {
-        digest: async () => new ArrayBuffer(32),
-        generateKey: async () => ({}),
-        importKey: async () => ({}),
-        exportKey: async () => ({}),
-        encrypt: async () => new ArrayBuffer(32),
-        decrypt: async () => new ArrayBuffer(32),
-    };
-}
-
-console.warn('================================================================================');
-console.warn('⚠️  CRYPTO FALLBACK ACTIVE - Using Math.random for testing only!');
-console.warn('================================================================================');
-
-// Try to load native module but don't fail if it doesn't work
-try {
-    require('react-native-get-random-values');
-    // If it loads, it will override our fallback (which is fine)
-} catch (e) {
-    // Ignore - we have our fallback
-}
-
-// ============================================================================
-// Patch Noble Libraries Random Function
-// ============================================================================
-
-// The noble libraries check for crypto in a specific way
-// We need to ensure they find our implementation
-if (typeof globalThis === 'undefined') {
-    global.globalThis = global;
-}
-
-// Ensure globalThis has crypto
-globalThis.crypto = global.crypto;
-
-// Also set on window (some libraries check window.crypto)
-if (typeof window !== 'undefined') {
-    window.crypto = global.crypto;
-}
-
-// ============================================================================
-// Buffer and Text Encoding Polyfills
-// ============================================================================
-
+// Step 2: Import and setup Buffer
 import { Buffer } from 'buffer';
 global.Buffer = Buffer;
-
-// Make Buffer available on globalThis too
 globalThis.Buffer = Buffer;
 
-// btoa/atob for base64
-if (!global.btoa) {
-    global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
-}
-if (!global.atob) {
-    global.atob = (str) => Buffer.from(str, 'base64').toString('binary');
-}
+// Step 3: Setup text encoding
+global.TextEncoder = class TextEncoder {
+    encode(str) {
+        if (!str) return new Uint8Array(0);
+        const buf = Buffer.from(str, 'utf8');
+        // Create proper Uint8Array from Buffer
+        return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    }
+};
 
-// TextEncoder/TextDecoder
-if (typeof global.TextEncoder === 'undefined') {
-    global.TextEncoder = class TextEncoder {
-        encode(str) {
-            if (!str) return new Uint8Array(0);
-            const buf = Buffer.from(str, 'utf8');
-            const arr = new Uint8Array(buf.length);
-            for (let i = 0; i < buf.length; i++) {
-                arr[i] = buf[i];
-            }
-            return arr;
+global.TextDecoder = class TextDecoder {
+    constructor(encoding = 'utf-8') {
+        this.encoding = encoding;
+    }
+    
+    decode(arr) {
+        if (!arr) return '';
+        if (arr instanceof ArrayBuffer) {
+            arr = new Uint8Array(arr);
         }
-    };
-}
+        return Buffer.from(arr).toString('utf8');
+    }
+};
 
-if (typeof global.TextDecoder === 'undefined') {
-    global.TextDecoder = class TextDecoder {
-        constructor(encoding = 'utf-8') {
-            this.encoding = encoding;
-        }
-
-        decode(arr) {
-            if (!arr) return '';
-            if (arr instanceof ArrayBuffer) {
-                arr = new Uint8Array(arr);
-            }
-            return Buffer.from(arr).toString('utf8');
-        }
-    };
-}
-
-// Make text encoding available globally
 globalThis.TextEncoder = global.TextEncoder;
 globalThis.TextDecoder = global.TextDecoder;
 
-// Process polyfill
-if (typeof global.process === 'undefined') {
+// Step 4: Setup process
+if (!global.process) {
     global.process = {
         version: 'v16.0.0',
         env: { NODE_ENV: __DEV__ ? 'development' : 'production' }
     };
 }
 
+// Step 5: Base64 encoding
+global.btoa = (str) => Buffer.from(str, 'binary').toString('base64');
+global.atob = (str) => Buffer.from(str, 'base64').toString('binary');
+
+// Step 6: Ensure crypto is available on all global objects
+globalThis.crypto = global.crypto;
+if (typeof window !== 'undefined') {
+    window.crypto = global.crypto;
+}
+
 // ============================================================================
-// NOW import React Native (after all polyfills are set)
+// NOW import React Native and App (after all polyfills are set)
 // ============================================================================
 
 import { AppRegistry, LogBox, Platform } from 'react-native';
 import App from './App';
 
-// Hardcode the app name to avoid import issues
 const appName = 'GhostCommV2';
 
 // Debug utility
@@ -203,7 +109,7 @@ if (__DEV__) {
     console.log('  TextEncoder:', typeof TextEncoder !== 'undefined' ? '✅' : '❌');
     console.log('  TextDecoder:', typeof TextDecoder !== 'undefined' ? '✅' : '❌');
 
-    // Ignore errors
+    // Ignore specific warnings
     LogBox.ignoreLogs([
         'Non-serializable values were found',
         'VirtualizedLists should never be nested',
@@ -225,10 +131,17 @@ if (__DEV__) {
 
             console.log('[TEST] Random bytes generated:', nonZero ? '✅' : '❌');
             console.log('[TEST] Randomness quality: ' + unique + '/32 unique values');
-            console.log('[TEST] Noble library will load when needed');
+            
+            // Test if we can actually create noble keys
+            console.log('[TEST] Testing noble library compatibility...');
+            const { ed25519 } = require('@noble/curves/ed25519');
+            const testPrivKey = ed25519.utils.randomPrivateKey();
+            console.log('[TEST] Noble ed25519 key generation:', testPrivKey.length === 32 ? '✅' : '❌');
+            
             console.log('[TEST] Crypto system ready for keypair generation\n');
         } catch (error) {
             console.error('[TEST] Crypto test failed:', error.message);
+            console.error('[TEST] Stack:', error.stack);
         }
     }, 1000);
 }
@@ -242,11 +155,11 @@ console.log('[SYSTEM] Loading encryption modules...');
 console.log('[SYSTEM] Preparing mesh network stack...');
 
 // ============================================================================
-// Register App - CRITICAL: Only register with ONE name!
+// Register App
 // ============================================================================
 
-// Register with the hardcoded name
-AppRegistry.registerComponent('GhostCommV2', () => App);
+AppRegistry.registerComponent(appName, () => App);
 
-console.log('[INIT] App registered as "GhostCommV2"');
-console.log('[INIT] Crypto polyfills installed - keypair generation should work\n');
+console.log('[INIT] App registered as "' + appName + '"');
+console.log('[INIT] Crypto polyfills installed - using secure randomness');
+console.log('================================================================================\n');
