@@ -23,19 +23,58 @@ import {
  * Handles binary packet parsing and node discovery
  */
 export class ReactNativeBLEScanner extends BLEScanner {
-    async pauseScanning(): Promise<void> {
-        throw new Error('Method not implemented.');
-    }
-    async resumeScanning(): Promise<void> {
-        throw new Error('Method not implemented.');
-    }
     private bleManager: BleManager;
     private scanSubscription?: any;
     private discoveredDevices: Map<string, Device> = new Map();
+    private _scanPaused: boolean = false;
+    private currentConfig?: ScanConfig;
 
     constructor(keyPair?: IGhostKeyPair, bleManager?: BleManager) {
         super(keyPair);
         this.bleManager = bleManager || new BleManager();
+    }
+
+    /**
+     * Check if scanning is paused (renamed to avoid conflict)
+     */
+    isScanPaused(): boolean {
+        return this._scanPaused;
+    }
+
+    /**
+     * Pause scanning
+     */
+    async pauseScanning(): Promise<void> {
+        if (this._scanPaused) {
+            return;
+        }
+
+        console.log('⏸️ Pausing BLE scanning');
+        
+        if (this.scanSubscription) {
+            this.scanSubscription.remove();
+            this.scanSubscription = undefined;
+        }
+        
+        this.bleManager.stopDeviceScan();
+        this._scanPaused = true;
+    }
+
+    /**
+     * Resume scanning
+     */
+    async resumeScanning(): Promise<void> {
+        if (!this._scanPaused) {
+            return;
+        }
+
+        console.log('▶️ Resuming BLE scanning');
+        
+        if (this.currentConfig) {
+            await this.startPlatformScanning(this.currentConfig);
+        }
+        
+        this._scanPaused = false;
     }
 
     /**
@@ -44,6 +83,10 @@ export class ReactNativeBLEScanner extends BLEScanner {
     protected async startPlatformScanning(config: ScanConfig): Promise<void> {
         try {
             console.log('🔍 Starting React Native BLE scanning...');
+            
+            // Store config for resume
+            this.currentConfig = config;
+            this._scanPaused = false;
 
             // Convert config to react-native-ble-plx options
             const scanOptions = {
@@ -64,7 +107,7 @@ export class ReactNativeBLEScanner extends BLEScanner {
                         return;
                     }
 
-                    if (device) {
+                    if (device && !this._scanPaused) {
                         this.handleDeviceDiscovered(device);
                     }
                 }
@@ -90,6 +133,8 @@ export class ReactNativeBLEScanner extends BLEScanner {
 
             this.bleManager.stopDeviceScan();
             this.discoveredDevices.clear();
+            this._scanPaused = false;
+            this.currentConfig = undefined;
 
             console.log('✅ React Native BLE scanning stopped');
 

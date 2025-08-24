@@ -21,6 +21,7 @@ import {
 export class ReactNativeBLEAdvertiser extends BLEAdvertiser {
     private bleManager: BleManager;
     private simulatedAdvertisementData?: BLEAdvertisementData;
+    private isInitialized: boolean = false;
 
     // Mesh tracking for platform-specific methods
     private meshNodeCount: number = 0;
@@ -32,11 +33,47 @@ export class ReactNativeBLEAdvertiser extends BLEAdvertiser {
     }
 
     /**
+     * Initialize BLE manager if not already initialized
+     */
+    private async ensureInitialized(): Promise<void> {
+        if (this.isInitialized) {
+            return;
+        }
+
+        try {
+            // Check if BLE is powered on
+            const state = await this.bleManager.state();
+            if (state !== 'PoweredOn') {
+                console.log(`⏳ Waiting for BLE to power on (current state: ${state})`);
+                
+                // Wait for BLE to be powered on
+                await new Promise<void>((resolve) => {
+                    const subscription = this.bleManager.onStateChange((newState) => {
+                        if (newState === 'PoweredOn') {
+                            subscription.remove();
+                            resolve();
+                        }
+                    }, true);
+                });
+            }
+
+            this.isInitialized = true;
+            console.log('✅ BLE Manager initialized');
+        } catch (error) {
+            console.error('❌ Failed to initialize BLE Manager:', error);
+            throw error;
+        }
+    }
+
+    /**
      * Start platform-specific advertising with binary packet
      * Since we can't actually advertise, we simulate it
      */
     protected async startPlatformAdvertising(packet: Uint8Array): Promise<void> {
         try {
+            // Ensure BLE is initialized
+            await this.ensureInitialized();
+
             // Parse the packet to understand what we would advertise
             const parsedPacket = BLEAdvertiser.parseAdvertisementPacket(packet);
             if (!parsedPacket) {
@@ -46,7 +83,7 @@ export class ReactNativeBLEAdvertiser extends BLEAdvertiser {
             // Store the simulated advertisement data
             this.simulatedAdvertisementData = await this.packetToAdvertisementData(parsedPacket);
 
-            // Log what we would advertise
+            // Log what we would advertise (reduced logging)
             console.log(`📡 Simulating v2.0 advertisement:`);
             console.log(`  - Ephemeral ID: ${this.bytesToHexString(parsedPacket.ephemeralId).substring(0, 16)}...`);
             console.log(`  - Identity Hash: ${this.bytesToHexString(parsedPacket.identityHash)}`);
@@ -80,12 +117,6 @@ export class ReactNativeBLEAdvertiser extends BLEAdvertiser {
      * Update platform advertising with new packet
      */
     protected async updatePlatformAdvertising(packet: Uint8Array): Promise<void> {
-        // Check if advertising using parent's property
-        const status = this.getStatus();
-        if (!status.isAdvertising) {
-            throw new Error('Not currently advertising');
-        }
-
         try {
             const parsedPacket = BLEAdvertiser.parseAdvertisementPacket(packet);
             if (!parsedPacket) {
@@ -93,7 +124,11 @@ export class ReactNativeBLEAdvertiser extends BLEAdvertiser {
             }
 
             this.simulatedAdvertisementData = await this.packetToAdvertisementData(parsedPacket);
-            console.log(`🔄 Updated advertisement (sequence: ${parsedPacket.sequenceNumber})`);
+            
+            // Only log every 10th update to reduce spam
+            if (parsedPacket.sequenceNumber % 10 === 0) {
+                console.log(`🔄 Updating advertisement data`);
+            }
 
         } catch (error) {
             console.error('❌ Failed to update platform advertising:', error);
@@ -259,6 +294,18 @@ export class ReactNativeBLEAdvertiser extends BLEAdvertiser {
             await this.stopAdvertising();
         }
         this.simulatedAdvertisementData = undefined;
+        this.isInitialized = false;
+    }
+
+    /**
+     * Get BLE state (for debugging)
+     */
+    public async getBLEState(): Promise<string> {
+        try {
+            return await this.bleManager.state();
+        } catch (error) {
+            return 'Unknown';
+        }
     }
 
     /**
