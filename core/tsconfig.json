@@ -1,0 +1,49 @@
+// core/tsconfig.json
+{
+    "compilerOptions": {
+        // Target and Module
+        "target": "ES2020",
+        "module": "commonjs",
+        "lib": [
+            "ES2020"
+        ],
+        // Module Resolution
+        "moduleResolution": "node",
+        "esModuleInterop": true,
+        "allowSyntheticDefaultImports": true,
+        "resolveJsonModule": true,
+        "baseUrl": "./",
+        // Type Checking
+        "strict": true,
+        "skipLibCheck": true,
+        "noUnusedLocals": false, // Changed to false for build
+        "noUnusedParameters": false, // Changed to false for build
+        "noImplicitReturns": true,
+        "noFallthroughCasesInSwitch": true,
+        "forceConsistentCasingInFileNames": true,
+        // Emit
+        "declaration": true,
+        "declarationMap": true,
+        "sourceMap": true,
+        "outDir": "./dist",
+        "rootDir": "./src",
+        "removeComments": true,
+        "composite": true,
+        // Interop Constraints
+        "isolatedModules": true,
+        "allowJs": false,
+        // Type Definitions
+        "types": [
+            "node"
+        ]
+    },
+    "include": [
+        "src/**/*.ts"
+    ],
+    "exclude": [
+        "node_modules",
+        "dist",
+        "**/*.spec.ts",
+        "**/*.test.ts"
+    ]
+}
