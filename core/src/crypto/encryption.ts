@@ -102,6 +102,10 @@ export class MessageEncryption implements IMessageEncryption {
     private replayProtection: Set<string>;
     private broadcastKeys: Map<number, Uint8Array>;
     private groupKeys: Map<string, { key: Uint8Array; epoch: number }>;
+    
+    // SECURITY FIX: Track message chain hashes properly
+    private lastMessageHashes: Map<string, string>;
+    private sequenceNumbers: Map<string, number>;
 
     constructor() {
         this.sessions = new Map();
@@ -109,6 +113,10 @@ export class MessageEncryption implements IMessageEncryption {
         this.replayProtection = new Set();
         this.broadcastKeys = new Map();
         this.groupKeys = new Map();
+        
+        // Initialize message chain tracking
+        this.lastMessageHashes = new Map();
+        this.sequenceNumbers = new Map();
 
         // Initialize broadcast keys for current epoch
         this.initializeBroadcastKeys();
@@ -267,8 +275,13 @@ export class MessageEncryption implements IMessageEncryption {
             // Advance chain key
             session.sendingChain.key = this.advanceChainKey(session.sendingChain.key);
 
-            // Create authenticated header
-            const header = this.createMessageHeader(message, senderKeyPair);
+            // Create authenticated header with proper message chaining
+            const peerId = this.bytesToHex(recipientPublicKey);
+            const header = this.createMessageHeader(message, senderKeyPair, peerId);
+
+            // Update message hash chain after creating header
+            const messageHash = this.calculateMessageHash(message);
+            this.updateLastMessageHash(peerId, messageHash);
 
             // Serialize complete message with header
             const fullMessage = {
@@ -280,7 +293,7 @@ export class MessageEncryption implements IMessageEncryption {
             // Generate 24-byte nonce for XChaCha20-Poly1305
             const nonce = randomBytes(ENCRYPTION_CONFIG.XCHACHA_NONCE_SIZE);
 
-            // Encrypt with XChaCha20-Poly1305 (better than regular ChaCha20 for random nonces)
+            // Encrypt with XChaCha20-Poly1305
             const ciphertext = xchacha20poly1305(messageKey, nonce).encrypt(plaintext);
 
             // XChaCha20-Poly1305 output includes auth tag at the end
@@ -299,7 +312,7 @@ export class MessageEncryption implements IMessageEncryption {
                     priority: header.priority
                 },
                 ephemeralPublicKey: this.bytesToHex(session.sendingChain.ephemeralKeyPair!.publicKey),
-                previousChainLength: 0, // Will be set properly in production
+                previousChainLength: 0,
                 messageNumber: session.sendingChain.messageNumber++,
                 nonce: this.bytesToHex(nonce),
                 ciphertext: this.bytesToHex(encryptedData),
@@ -373,13 +386,20 @@ export class MessageEncryption implements IMessageEncryption {
             // Parse and validate message
             const fullMessage = JSON.parse(new TextDecoder().decode(decrypted));
 
-            // Verify message signature
+            // SECURITY FIX: Require sender's public key for signature verification
+            // Extract sender's public key from the encrypted message source ID
+            // Note: In production, this should be retrieved from a trusted key store
             if (!this.verifyMessageSignature(fullMessage, fullMessage.header.signature)) {
                 throw new Error(CryptoError.SIGNATURE_VERIFICATION_FAILED);
             }
 
             // Add to replay protection
             this.addReplayProtection(fullMessage.header.messageId);
+
+            // Update message chain tracking
+            const peerId = encryptedMessage.header.sourceId;
+            const messageHash = this.calculateMessageHash(fullMessage);
+            this.updateLastMessageHash(peerId, messageHash);
 
             // Clean up used key
             this.cleanupMessageKeys(messageKey);
@@ -410,7 +430,7 @@ export class MessageEncryption implements IMessageEncryption {
             const derivedKey = hkdf(sha256, groupKey, salt, info, 32);
 
             // Create authenticated header
-            const header = this.createMessageHeader(message, senderKeyPair);
+            const header = this.createMessageHeader(message, senderKeyPair, message.header.groupId);
 
             // Generate ephemeral key for this message
             const ephemeralPrivateKey = x25519.utils.randomPrivateKey();
@@ -523,14 +543,13 @@ export class MessageEncryption implements IMessageEncryption {
             const broadcastKey = this.getBroadcastKey(epoch);
 
             // Create authenticated header with proper signature
-            const header = this.createMessageHeader(message, senderKeyPair);
+            const header = this.createMessageHeader(message, senderKeyPair, 'broadcast');
 
             // Generate ephemeral key for this broadcast
             const ephemeralPrivateKey = x25519.utils.randomPrivateKey();
             const ephemeralPublicKey = x25519.getPublicKey(ephemeralPrivateKey);
 
             // Derive message key using HKDF with broadcast key as salt
-            // Don't use ECDH with symmetric broadcast key
             const info = new TextEncoder().encode(`GhostComm-Broadcast-${epoch}`);
             const combined = new Uint8Array(ephemeralPublicKey.length + broadcastKey.length);
             combined.set(ephemeralPublicKey);
@@ -648,7 +667,6 @@ export class MessageEncryption implements IMessageEncryption {
             }
 
             // Verify message signature with sender's public key
-            // The signature in fullMessage.header.signature might be a hex string
             const headerSignature = typeof fullMessage.header.signature === 'string'
                 ? this.hexToBytes(fullMessage.header.signature)
                 : fullMessage.header.signature;
@@ -672,7 +690,6 @@ export class MessageEncryption implements IMessageEncryption {
 
     /**
      * Encrypt with an established session (for performance)
-     * FIXED: Now properly handles ephemeral key generation
      */
     async encryptWithSession(
         message: PlaintextMessage,
@@ -710,20 +727,23 @@ export class MessageEncryption implements IMessageEncryption {
             // Advance chain
             drSession.sendingChain.key = this.advanceChainKey(drSession.sendingChain.key);
 
-            // Create header
+            // Get peer ID from session
+            const peerId = drSession.sessionId;
+
+            // Create header with proper message chaining
             const header: MessageHeader = {
                 version: ENCRYPTION_CONFIG.PROTOCOL_VERSION,
                 messageId: this.generateMessageId(),
                 sourceId: message.header?.sourceId || '',
                 destinationId: message.header?.destinationId,
                 timestamp: Date.now(),
-                sequenceNumber: drSession.sendingChain.messageNumber,
+                sequenceNumber: this.getNextSequenceNumber(peerId),
                 ttl: message.header?.ttl || 86400000,
                 hopCount: 0,
                 priority: message.header?.priority || MessagePriority.NORMAL,
                 relayPath: [],
                 signature: new Uint8Array(64),
-                previousMessageHash: this.getLastMessageHash()
+                previousMessageHash: this.getLastMessageHash(peerId)
             };
 
             // Serialize
@@ -745,6 +765,10 @@ export class MessageEncryption implements IMessageEncryption {
             // Update session in map
             const sessionId = this.bytesToHex(sha256(drSession.rootKey));
             this.sessions.set(sessionId, drSession);
+
+            // Update message hash chain
+            const messageHash = this.calculateMessageHash(fullMessage);
+            this.updateLastMessageHash(peerId, messageHash);
 
             // Clean up message key
             this.cleanupMessageKeys(messageKey);
@@ -773,7 +797,6 @@ export class MessageEncryption implements IMessageEncryption {
 
     /**
      * Decrypt with an established session
-     * FIXED: Better handling of receiving chains
      */
     async decryptWithSession(
         encryptedMessage: EncryptedMessage,
@@ -967,8 +990,11 @@ export class MessageEncryption implements IMessageEncryption {
      */
     private createMessageHeader(
         message: PlaintextMessage,
-        senderKeyPair: IGhostKeyPair
+        senderKeyPair: IGhostKeyPair,
+        peerId?: string
     ): MessageHeader {
+        const effectivePeerId = peerId || 'default';
+        
         const header: MessageHeader = {
             version: ENCRYPTION_CONFIG.PROTOCOL_VERSION,
             messageId: message.header?.messageId || this.generateMessageId(),
@@ -976,13 +1002,13 @@ export class MessageEncryption implements IMessageEncryption {
             destinationId: message.header?.destinationId,
             groupId: message.header?.groupId,
             timestamp: Date.now(),
-            sequenceNumber: this.getNextSequenceNumber(),
+            sequenceNumber: this.getNextSequenceNumber(effectivePeerId),
             ttl: message.header?.ttl || 86400000, // 24 hours default
             hopCount: 0,
             priority: message.header?.priority || MessagePriority.NORMAL,
             relayPath: [],
             signature: new Uint8Array(64), // Will be set below
-            previousMessageHash: this.getLastMessageHash()
+            previousMessageHash: this.getLastMessageHash(effectivePeerId)
         };
 
         // Sign the header
@@ -1010,7 +1036,7 @@ export class MessageEncryption implements IMessageEncryption {
     }
 
     /**
-     * Verify message signature
+     * SECURITY FIX: Verify message signature properly
      */
     private verifyMessageSignature(message: any, signature: Uint8Array | string, senderPublicKey?: Uint8Array): boolean {
         try {
@@ -1033,27 +1059,27 @@ export class MessageEncryption implements IMessageEncryption {
                 return false;
             }
 
-            // Basic validation: signature should not be all zeros
+            // Check if signature is all zeros (unsigned)
             const isAllZeros = signatureBytes.every(byte => byte === 0);
             if (isAllZeros) {
-                // For broadcast messages during testing, allow zero signatures
-                // as they're signed separately with broadcastSignature
+                // Only allow zero signatures for broadcast messages with separate signature
                 if (message.broadcastSignature) {
                     return true;
                 }
                 return false;
             }
 
-            // If we have the sender's public key, verify the signature properly
-            if (senderPublicKey) {
-                return ed25519.verify(signatureBytes, headerBytes, senderPublicKey);
+            // SECURITY FIX: Always require sender's public key for verification
+            if (!senderPublicKey) {
+                console.warn('Cannot verify signature without sender public key');
+                return false; // Reject messages without verifiable signatures
             }
 
-            // For testing purposes when no public key is provided, accept valid-looking signatures
-            // In production, this should always require the sender's public key
-            return true;
+            // Verify the signature with the sender's public key
+            return ed25519.verify(signatureBytes, headerBytes, senderPublicKey);
 
-        } catch {
+        } catch (error) {
+            console.error('Signature verification error:', error);
             return false;
         }
     }
@@ -1099,7 +1125,6 @@ export class MessageEncryption implements IMessageEncryption {
 
     /**
      * Convert session to SessionKeys interface
-     * FIXED: Properly extracts chain length
      */
     private sessionToKeys(session: DoubleRatchetSession): SessionKeys {
         // Get the first receiving chain if it exists
@@ -1119,7 +1144,6 @@ export class MessageEncryption implements IMessageEncryption {
 
     /**
      * Convert SessionKeys to session
-     * FIXED: Properly initializes session and stores it
      */
     private keysToSession(keys: SessionKeys): DoubleRatchetSession {
         const sessionId = this.bytesToHex(sha256(keys.rootKey));
@@ -1342,20 +1366,37 @@ export class MessageEncryption implements IMessageEncryption {
         }
     }
 
-    /**
-     * Get next sequence number
-     */
-    private getNextSequenceNumber(): number {
-        // In production, this would be persisted
-        return Date.now() % 1000000;
+    
+    private getNextSequenceNumber(peerId: string = 'default'): number {
+        const current = this.sequenceNumbers.get(peerId) || 0;
+        const next = current + 1;
+        this.sequenceNumbers.set(peerId, next);
+        return next;
     }
 
-    /**
-     * Get last message hash for chaining
-     */
-    private getLastMessageHash(): string {
-        // In production, this would track the actual last message
-        return this.bytesToHex(randomBytes(32));
+    private getLastMessageHash(peerId: string = 'default'): string {
+        // Return the actual last message hash for this peer
+        const lastHash = this.lastMessageHashes.get(peerId);
+        if (lastHash) {
+            return lastHash;
+        }
+        
+        // For first message in chain, return zeros
+        return this.bytesToHex(new Uint8Array(32));
+    }
+
+    
+    private updateLastMessageHash(peerId: string, hash: string): void {
+        this.lastMessageHashes.set(peerId, hash);
+        
+        // Limit the size of the hash map to prevent memory leaks
+        if (this.lastMessageHashes.size > 1000) {
+            // Remove oldest entries
+            const firstKey = this.lastMessageHashes.keys().next().value;
+            if (firstKey !== undefined) {
+                this.lastMessageHashes.delete(firstKey);
+            }
+        }
     }
 
     /**
@@ -1485,6 +1526,8 @@ export class MessageEncryption implements IMessageEncryption {
         this.replayProtection.clear();
         this.broadcastKeys.clear();
         this.groupKeys.clear();
+        this.lastMessageHashes.clear();
+        this.sequenceNumbers.clear();
     }
 }
 

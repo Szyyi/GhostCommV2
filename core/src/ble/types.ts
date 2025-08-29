@@ -1,5 +1,5 @@
 // core/src/ble/types.ts
-// Enhanced BLE type definitions with advanced security features
+// Enhanced BLE type definitions with advanced security features - Protocol v2
 
 import {
     SessionKeys,
@@ -19,17 +19,18 @@ import {
  * Enhanced BLE node with full cryptographic identity
  */
 export interface BLENode {
-    canSee: any;
-    lastRSSI: number;
-    batteryLevel: number | undefined;
     // Identity
     id: string;                       // 256-bit fingerprint (SHA-256 of public keys)
     name: string;                     // Human-readable device name
 
-    // Cryptographic keys
-    identityKey: Uint8Array;          // Ed25519 identity public key
+    // Cryptographic keys (REQUIRED for v2)
+    identityKey: Uint8Array;          // Ed25519 identity public key - REQUIRED
     encryptionKey: Uint8Array;        // X25519 encryption public key
     preKeys?: PreKey[];               // Available pre-keys for async key exchange
+
+    // Key validation tracking
+    keysValidatedAt?: number;         // When keys were last validated
+    keyValidationMethod?: 'handshake' | 'advertisement' | 'message';
 
     // Connection status
     isConnected: boolean;             // Current connection status
@@ -40,6 +41,7 @@ export interface BLENode {
     lastSeen: number;                 // Unix timestamp of last contact
     firstSeen: number;                // When first discovered
     rssi: number;                     // Signal strength (-100 to 0 dBm)
+    lastRSSI: number;                 // Last recorded RSSI
     txPower?: number;                 // Transmission power
     distance?: number;                // Estimated distance in meters
 
@@ -50,7 +52,7 @@ export interface BLENode {
     trustScore: number;               // 0-100 trust rating
 
     // Capabilities
-    protocolVersion: number;          // Supported protocol version
+    protocolVersion: number;          // MUST be 2 for new protocol
     capabilities: NodeCapability[];   // Node capabilities
     deviceType: DeviceType;           // Device type
     supportedAlgorithms: CryptoAlgorithm[]; // Crypto support
@@ -64,10 +66,14 @@ export interface BLENode {
     bluetoothAddress: string;         // Current BLE MAC address
     addressRotationTime?: number;    // When address will rotate
     previousAddresses?: string[];    // Historical addresses for correlation
+
+    // Additional fields
+    batteryLevel?: number;            // Battery percentage
+    canSee: any;                      // Visibility state (preserved from original)
 }
 
 /**
- * Active BLE session with Double Ratchet state
+ * Active BLE session with Double Ratchet state and message chain tracking
  */
 export interface BLESession {
     sessionId: string;                // Unique session identifier
@@ -79,6 +85,16 @@ export interface BLESession {
     sessionKeys: SessionKeys;         // Current session keys
     sendMessageNumber: number;        // Outgoing message counter
     receiveMessageNumber: number;     // Incoming message counter
+
+    // Message chain tracking (Protocol v2)
+    lastSentMessageHash?: string;     // Hash of last sent message
+    lastReceivedMessageHash?: string; // Hash of last received message
+    sentSequenceNumber: number;       // Outgoing sequence number
+    receivedSequenceNumber: number;   // Incoming sequence number
+
+    // Public key cache for verification
+    peerIdentityKey?: Uint8Array;     // Cached peer's Ed25519 public key
+    peerEncryptionKey?: Uint8Array;   // Cached peer's X25519 public key
 
     // Connection parameters
     mtu: number;                      // Maximum transmission unit
@@ -104,7 +120,7 @@ export interface BLESession {
  */
 export interface BLEAdvertisementData {
     // Protocol version
-    version: number;                  // Protocol version
+    version: number;                  // Protocol version (must be 2)
 
     // Identity (rotating for privacy)
     ephemeralId: string;             // Rotating ephemeral ID
@@ -134,6 +150,7 @@ export interface BLEAdvertisementData {
  */
 export interface IdentityProof {
     publicKeyHash: string;           // Hash of identity public key
+    publicKey: string;               // Full hex-encoded Ed25519 public key (v2)
     timestamp: number;               // Proof timestamp
     nonce: string;                   // Random nonce
     signature: string;               // Ed25519 signature
@@ -170,12 +187,12 @@ export interface MeshAdvertisement {
 // ===== MESSAGE TYPES =====
 
 /**
- * Enhanced BLE message with full encryption metadata
+ * Enhanced BLE message with full encryption metadata and verification context
  */
 export interface BLEMessage {
     // Message identity
     messageId: string;               // 256-bit unique identifier
-    version: number;                 // Protocol version
+    version: number;                 // Protocol version (must be 2)
 
     // Routing information
     sourceId: string;                // Original sender fingerprint
@@ -184,6 +201,15 @@ export interface BLEMessage {
     hopCount: number;                // Current hop count
     maxHops: number;                 // Maximum allowed hops
     priority: MessagePriority;       // Message priority
+
+    // Sender verification context (Protocol v2 - CRITICAL)
+    senderPublicKey: string;         // Hex-encoded Ed25519 public key for verification
+    messageSignature: string;        // Ed25519 signature of the message
+    
+    // Message chain fields (Protocol v2)
+    messageHash: string;             // SHA-256 hash of this message
+    previousMessageHash: string;     // Hash of previous message in chain
+    sequenceNumber: number;          // Message sequence number
 
     // Encrypted payload
     encryptedPayload: EncryptedMessage; // Full encrypted message
@@ -250,11 +276,12 @@ export interface BLEConnectionEvent {
 }
 
 /**
- * Enhanced message event with delivery tracking
+ * Enhanced message event with delivery tracking and verification
  */
 export interface BLEMessageEvent {
     type: 'message_received' | 'message_sent' | 'message_failed' |
-    'message_acknowledged' | 'message_relayed' | 'fragment_received';
+          'message_acknowledged' | 'message_relayed' | 'fragment_received' |
+          'signature_verification_failed';  // Protocol v2
 
     message: BLEMessage;
 
@@ -262,6 +289,14 @@ export interface BLEMessageEvent {
     fromNodeId?: string;
     toNodeId?: string;
     sessionId?: string;
+
+    // Verification context (Protocol v2)
+    senderNode?: BLENode;            // Full node info including public keys
+    verificationResult?: {
+        verified: boolean;
+        method: 'signature' | 'session';
+        error?: string;
+    };
 
     // Delivery status
     delivered?: boolean;
@@ -353,7 +388,7 @@ export interface BLEError {
 }
 
 /**
- * BLE error codes
+ * BLE error codes - Enhanced for Protocol v2
  */
 export enum BLEErrorCode {
     // Connection errors
@@ -366,6 +401,12 @@ export enum BLEErrorCode {
     INVALID_SIGNATURE = 'INVALID_SIGNATURE',
     KEY_EXCHANGE_FAILED = 'KEY_EXCHANGE_FAILED',
     SESSION_EXPIRED = 'SESSION_EXPIRED',
+
+    // Signature verification errors (Protocol v2)
+    NO_SENDER_KEY = 'NO_SENDER_KEY',
+    SIGNATURE_VERIFICATION_FAILED = 'SIG_VERIFY_FAILED',
+    INVALID_MESSAGE_CHAIN = 'INVALID_MESSAGE_CHAIN',
+    SEQUENCE_NUMBER_MISMATCH = 'SEQ_NUM_MISMATCH',
 
     // Message errors
     MESSAGE_TOO_LARGE = 'MESSAGE_TOO_LARGE',
@@ -385,7 +426,8 @@ export enum BLEErrorCode {
     // Protocol errors
     UNSUPPORTED_VERSION = 'UNSUPPORTED_VERSION',
     INVALID_FORMAT = 'INVALID_FORMAT',
-    REPLAY_DETECTED = 'REPLAY_DETECTED'
+    REPLAY_DETECTED = 'REPLAY_DETECTED',
+    PROTOCOL_VERSION_MISMATCH = 'PROTOCOL_VERSION_MISMATCH'
 }
 
 // ===== MESH ROUTING TYPES =====
@@ -426,6 +468,34 @@ export interface RelayStatistics {
     lastRelayTime: number;
 }
 
+// ===== PROTOCOL v2 TYPES =====
+
+/**
+ * Protocol handshake for version negotiation and key exchange
+ */
+export interface ProtocolHandshake {
+    protocolVersion: number;         // Must be 2 for current protocol
+    supportedVersions: number[];     // For backward compatibility check
+    identityKey: string;             // Hex-encoded Ed25519 public key
+    encryptionKey: string;           // Hex-encoded X25519 public key
+    timestamp: number;
+    nonce: string;
+    signature: string;               // Signed with identity key
+    capabilities: NodeCapability[];
+    requireSignatureVerification: boolean;  // Must be true for v2
+}
+
+/**
+ * Message verification context helper
+ */
+export interface MessageVerificationContext {
+    message: BLEMessage;
+    senderPublicKey: Uint8Array;    // Ed25519 public key
+    signature: Uint8Array;           // Message signature
+    previousMessageHash?: string;    // For chain verification
+    sequenceNumber?: number;         // For sequence verification
+}
+
 // ===== CONFIGURATION =====
 
 /**
@@ -455,10 +525,10 @@ export const BLE_CONFIG = {
     },
 
     // Timing parameters (ms)
-    ADVERTISEMENT_INTERVAL: 5000,        // 10 seconds base interval
+    ADVERTISEMENT_INTERVAL: 5000,        // 5 seconds base interval
     ADVERTISEMENT_RANDOMIZATION: 1000,    // ±1 second randomization
-    SCAN_INTERVAL: 5000,                // 20 seconds
-    SCAN_WINDOW: 4500,                  // 18 seconds
+    SCAN_INTERVAL: 5000,                // 5 seconds
+    SCAN_WINDOW: 4500,                  // 4.5 seconds
     CONNECTION_TIMEOUT: 10000,           // 10 seconds
     AUTHENTICATION_TIMEOUT: 5000,        // 5 seconds
 
@@ -505,6 +575,32 @@ export const BLE_CONFIG = {
     ADAPTIVE_POWER: true                // Adaptive TX power
 };
 
+/**
+ * BLE security configuration for Protocol v2
+ */
+export const BLE_SECURITY_CONFIG = {
+    // Protocol version (MUST match encryption.ts)
+    PROTOCOL_VERSION: 2,
+    
+    // Security requirements
+    REQUIRE_SIGNATURE_VERIFICATION: true,
+    REQUIRE_MESSAGE_CHAINING: true,
+    REQUIRE_SEQUENCE_NUMBERS: true,
+    
+    // Replay protection
+    REPLAY_WINDOW_SIZE: 1000,
+    MAX_SEQUENCE_NUMBER_GAP: 100,
+    
+    // Session management
+    SESSION_LIFETIME: 86400000,          // 24 hours
+    SESSION_REFRESH_INTERVAL: 3600000,   // 1 hour
+    
+    // Key management
+    REQUIRE_PUBLIC_KEY_IN_MESSAGE: true,
+    CACHE_PEER_KEYS: true,
+    KEY_CACHE_TTL: 3600000,              // 1 hour
+};
+
 // ===== CALLBACK TYPES =====
 
 /**
@@ -524,12 +620,17 @@ export type ConnectionCallback = (
 ) => void;
 
 /**
- * Message handler callback
+ * Message handler callback - Enhanced for Protocol v2
  */
 export type MessageCallback = (
     message: BLEMessage,
-    fromNode: BLENode,
-    session: BLESession
+    fromNode: BLENode,      // Contains identityKey for verification
+    session: BLESession,    // Contains cached peer keys
+    verificationResult: {   // Explicit verification result
+        verified: boolean;
+        senderPublicKey?: Uint8Array;
+        error?: string;
+    }
 ) => Promise<void>;
 
 /**
@@ -613,4 +714,5 @@ export interface BLECapabilities {
     offloadedScanning: boolean;     // Hardware scanning
 }
 
+// Re-export types from crypto module
 export { ConnectionState, NodeCapability, DeviceType, VerificationStatus };

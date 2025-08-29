@@ -5,28 +5,21 @@ import {
     BLEScanner,
     ScanConfig,
     ScanFilter,
-    BLENode,
-    BLEAdvertisementData,
     BLE_CONFIG,
-    NodeCapability,
-    DeviceType,
-    VerificationStatus,
-    IdentityProof,
-    PreKeyBundle,
-    IGhostKeyPair,
-    CryptoAlgorithm,
-    BLEAdvertiser
+    IGhostKeyPair
 } from '../../core';
 
 /**
- * React Native BLE Scanner Implementation for v2.0
- * Handles binary packet parsing and node discovery
+ * React Native BLE Scanner Implementation
+ * 
+ * This class ONLY implements platform-specific scanning operations.
+ * All Protocol v2 verification, public key extraction, and security features
+ * are handled by the base BLEScanner class.
  */
 export class ReactNativeBLEScanner extends BLEScanner {
     private bleManager: BleManager;
     private scanSubscription?: any;
     private discoveredDevices: Map<string, Device> = new Map();
-    private _scanPaused: boolean = false;
     private currentConfig?: ScanConfig;
 
     constructor(keyPair?: IGhostKeyPair, bleManager?: BleManager) {
@@ -35,58 +28,15 @@ export class ReactNativeBLEScanner extends BLEScanner {
     }
 
     /**
-     * Check if scanning is paused (renamed to avoid conflict)
-     */
-    isScanPaused(): boolean {
-        return this._scanPaused;
-    }
-
-    /**
-     * Pause scanning
-     */
-    async pauseScanning(): Promise<void> {
-        if (this._scanPaused) {
-            return;
-        }
-
-        console.log('⏸️ Pausing BLE scanning');
-        
-        if (this.scanSubscription) {
-            this.scanSubscription.remove();
-            this.scanSubscription = undefined;
-        }
-        
-        this.bleManager.stopDeviceScan();
-        this._scanPaused = true;
-    }
-
-    /**
-     * Resume scanning
-     */
-    async resumeScanning(): Promise<void> {
-        if (!this._scanPaused) {
-            return;
-        }
-
-        console.log('▶️ Resuming BLE scanning');
-        
-        if (this.currentConfig) {
-            await this.startPlatformScanning(this.currentConfig);
-        }
-        
-        this._scanPaused = false;
-    }
-
-    /**
-     * Start platform-specific scanning - implements abstract method
+     * Platform-specific: Start BLE scanning
+     * The base class handles all Protocol v2 verification
      */
     protected async startPlatformScanning(config: ScanConfig): Promise<void> {
         try {
-            console.log('🔍 Starting React Native BLE scanning...');
+            console.log(' Starting React Native BLE scanning...');
             
-            // Store config for resume
+            // Store config for potential resume operations
             this.currentConfig = config;
-            this._scanPaused = false;
 
             // Convert config to react-native-ble-plx options
             const scanOptions = {
@@ -97,9 +47,9 @@ export class ReactNativeBLEScanner extends BLEScanner {
                 reportDelay: 0
             };
 
-            // Start scanning
+            // Start scanning with optional service UUID filter
             this.scanSubscription = this.bleManager.startDeviceScan(
-                [BLE_CONFIG.SERVICE_UUID],
+                [BLE_CONFIG.SERVICE_UUID], // Filter for GhostComm service
                 scanOptions,
                 (error, device) => {
                     if (error) {
@@ -107,22 +57,22 @@ export class ReactNativeBLEScanner extends BLEScanner {
                         return;
                     }
 
-                    if (device && !this._scanPaused) {
+                    if (device) {
                         this.handleDeviceDiscovered(device);
                     }
                 }
             );
 
-            console.log('✅ React Native BLE scanning started');
+            console.log(' React Native BLE scanning started');
 
         } catch (error) {
-            console.error('❌ Failed to start scanning:', error);
+            console.error(' Failed to start scanning:', error);
             throw error;
         }
     }
 
     /**
-     * Stop platform-specific scanning - implements abstract method
+     * Platform-specific: Stop BLE scanning
      */
     protected async stopPlatformScanning(): Promise<void> {
         try {
@@ -133,28 +83,28 @@ export class ReactNativeBLEScanner extends BLEScanner {
 
             this.bleManager.stopDeviceScan();
             this.discoveredDevices.clear();
-            this._scanPaused = false;
             this.currentConfig = undefined;
 
-            console.log('✅ React Native BLE scanning stopped');
+            console.log(' React Native BLE scanning stopped');
 
         } catch (error) {
-            console.error('❌ Failed to stop scanning:', error);
+            console.error(' Failed to stop scanning:', error);
             throw error;
         }
     }
 
     /**
-     * Set platform scan filters - implements abstract method
+     * Platform-specific: Set scan filters
+     * Note: react-native-ble-plx has limited filter support
      */
     protected async setPlatformScanFilters(filters: ScanFilter[]): Promise<void> {
-        // react-native-ble-plx doesn't support dynamic filtering
-        // Filters would be applied during device processing
-        console.log(`📋 Scan filters configured (${filters.length} filters)`);
+        // react-native-ble-plx doesn't support dynamic filtering beyond service UUIDs
+        // Filters are applied by the base class after receiving scan results
+        console.log(` Scan filters configured (${filters.length} filters) - will be applied by base class`);
     }
 
     /**
-     * Check platform capabilities - implements abstract method
+     * Platform-specific: Check scanning capabilities
      */
     protected async checkPlatformCapabilities(): Promise<{
         maxScanFilters: number;
@@ -166,15 +116,15 @@ export class ReactNativeBLEScanner extends BLEScanner {
         const isSupported = state === 'PoweredOn';
 
         return {
-            maxScanFilters: 0, // react-native-ble-plx doesn't expose filter limits
+            maxScanFilters: 1, // react-native-ble-plx only supports service UUID filtering
             supportsActiveScan: isSupported,
             supportsContinuousScan: isSupported,
-            supportsBackgroundScan: Platform.OS === 'android' // iOS restricted
+            supportsBackgroundScan: Platform.OS === 'android' // iOS has restrictions
         };
     }
 
     /**
-     * Handle discovered device
+     * Handle discovered device and extract raw advertisement data
      */
     private async handleDeviceDiscovered(device: Device): Promise<void> {
         try {
@@ -183,35 +133,36 @@ export class ReactNativeBLEScanner extends BLEScanner {
                 return;
             }
 
-            // Store device
+            // Store device for reference
             this.discoveredDevices.set(device.id, device);
 
-            // Try to extract advertisement data
+            // Extract raw advertisement data
             const rawData = this.extractRawAdvertisementData(device);
             if (!rawData) {
-                console.log(`⚠️ No raw data for device ${device.id}`);
+                console.log(`⚠️ Could not extract advertisement data from device ${device.id}`);
                 return;
             }
 
-            // Call parent's handleScanResult with raw data
             await this.handleScanResult(
                 device.id,
                 rawData,
                 device.rssi || -100,
-                undefined // TX power not available in react-native-ble-plx
+                device.txPowerLevel ?? undefined // Convert null to undefined
             );
 
         } catch (error) {
-            console.error('❌ Error handling discovered device:', error);
+            console.error(' Error handling discovered device:', error);
         }
     }
 
     /**
-     * Check if device is a GhostComm device
+     * Check if device is advertising GhostComm service
      */
     private isGhostCommDevice(device: Device): boolean {
         // Check service UUIDs
-        if (device.serviceUUIDs?.includes(BLE_CONFIG.SERVICE_UUID)) {
+        if (device.serviceUUIDs?.some(uuid => 
+            uuid.toLowerCase() === BLE_CONFIG.SERVICE_UUID.toLowerCase()
+        )) {
             return true;
         }
 
@@ -220,11 +171,11 @@ export class ReactNativeBLEScanner extends BLEScanner {
             return true;
         }
 
-        // Check manufacturer data
+        // Check manufacturer data for our ID
         if (device.manufacturerData) {
             try {
                 const data = Buffer.from(device.manufacturerData, 'base64');
-                // Check for our manufacturer ID (0xFFFF)
+                // Check for our manufacturer ID (0xFFFF for testing)
                 if (data.length >= 2 && data[0] === 0xFF && data[1] === 0xFF) {
                     return true;
                 }
@@ -237,71 +188,73 @@ export class ReactNativeBLEScanner extends BLEScanner {
     }
 
     /**
-     * Extract raw advertisement data from device
+     * Extract raw advertisement data from React Native BLE device
      */
     private extractRawAdvertisementData(device: Device): Uint8Array | null {
-        // Try to extract from manufacturer data first (most complete)
+        // Priority 1: Manufacturer data (most complete)
         if (device.manufacturerData) {
             try {
                 const data = Buffer.from(device.manufacturerData, 'base64');
-
-                // Check if it looks like our v2.0 packet format
+                
+                // Check if it's already a complete v2 packet
                 if (data.length >= 108 && data[0] === 2) { // Version 2
                     return new Uint8Array(data);
                 }
 
-                // Try to construct packet from partial data
-                return this.constructPacketFromManufacturerData(data);
-            } catch {
-                // Invalid manufacturer data
+                // If it's partial, try to reconstruct
+                if (data.length > 2) {
+                    return this.reconstructPacketFromManufacturerData(data);
+                }
+            } catch (error) {
+                console.warn('Failed to parse manufacturer data:', error);
             }
         }
 
-        // Try to construct from service data
-        if (device.serviceData && device.serviceData[BLE_CONFIG.SERVICE_UUID]) {
-            try {
-                const data = Buffer.from(device.serviceData[BLE_CONFIG.SERVICE_UUID], 'base64');
-                return this.constructPacketFromServiceData(data, device);
-            } catch {
-                // Invalid service data
+        // Priority 2: Service data
+        if (device.serviceData) {
+            const serviceData = device.serviceData[BLE_CONFIG.SERVICE_UUID];
+            if (serviceData) {
+                try {
+                    const data = Buffer.from(serviceData, 'base64');
+                    if (data.length >= 108 && data[0] === 2) {
+                        return new Uint8Array(data);
+                    }
+                } catch (error) {
+                    console.warn('Failed to parse service data:', error);
+                }
             }
         }
 
-        // Fallback: construct minimal packet from device info
+        // Priority 3: Construct minimal packet for compatibility
+        // This allows the scanner to at least track the device
         return this.constructMinimalPacket(device);
     }
 
     /**
-     * Construct packet from manufacturer data
+     * Reconstruct packet from partial manufacturer data
      */
-    private constructPacketFromManufacturerData(data: Buffer): Uint8Array | null {
-        if (data.length < 20) {
-            return null;
+    private reconstructPacketFromManufacturerData(data: Buffer): Uint8Array | null {
+        // Skip manufacturer ID (first 2 bytes)
+        const payload = data.slice(2);
+        
+        if (payload.length < 20) {
+            return null; // Too small to be useful
         }
 
-        // Skip manufacturer ID (2 bytes)
-        const payload = data.slice(2);
-
-        // Create v2.0 packet structure
+        // Create a minimal v2 packet structure (108 bytes)
         const packet = new Uint8Array(108);
         const view = new DataView(packet.buffer);
         let offset = 0;
 
-        // Version
+        // Version (1 byte)
         packet[offset++] = 2;
 
-        // Flags (capabilities)
+        // Flags (1 byte) - capabilities
         packet[offset++] = 0x01; // RELAY capability
 
-        // Ephemeral ID (16 bytes) - use device data or generate
-        const ephemeralId = payload.slice(0, Math.min(16, payload.length));
-        packet.set(ephemeralId, offset);
-        if (ephemeralId.length < 16) {
-            // Pad with zeros
-            for (let i = ephemeralId.length; i < 16; i++) {
-                packet[offset + i] = 0;
-            }
-        }
+        // Ephemeral ID (16 bytes)
+        const ephemeralBytes = payload.slice(0, Math.min(16, payload.length));
+        packet.set(ephemeralBytes, offset);
         offset += 16;
 
         // Identity hash (8 bytes)
@@ -318,28 +271,21 @@ export class ReactNativeBLEScanner extends BLEScanner {
         view.setUint32(offset, Math.floor(Date.now() / 1000), false);
         offset += 4;
 
-        // Signature (64 bytes) - empty for now
+        // Signature (64 bytes) - will be empty/invalid
         offset += 64;
 
         // Mesh info (4 bytes)
         packet[offset++] = 0; // nodeCount
-        packet[offset++] = 0; // queueSize
+        packet[offset++] = 0; // queueSize  
         packet[offset++] = 100; // batteryLevel
-        packet[offset++] = 0x01; // flags (has pre-keys)
+        packet[offset++] = 0; // flags
 
         return packet;
     }
 
     /**
-     * Construct packet from service data
-     */
-    private constructPacketFromServiceData(data: Buffer, device: Device): Uint8Array | null {
-        // Similar to manufacturer data but with different layout
-        return this.constructMinimalPacket(device);
-    }
-
-    /**
-     * Construct minimal valid packet from device info
+     * Construct minimal packet when no advertisement data available
+     * This allows basic device tracking even without proper advertisements
      */
     private constructMinimalPacket(device: Device): Uint8Array {
         const packet = new Uint8Array(108);
@@ -354,7 +300,9 @@ export class ReactNativeBLEScanner extends BLEScanner {
 
         // Ephemeral ID (16 bytes) - derive from device ID
         const deviceIdBytes = new TextEncoder().encode(device.id);
-        packet.set(deviceIdBytes.slice(0, Math.min(16, deviceIdBytes.length)), offset);
+        const ephemeralId = new Uint8Array(16);
+        ephemeralId.set(deviceIdBytes.slice(0, Math.min(16, deviceIdBytes.length)));
+        packet.set(ephemeralId, offset);
         offset += 16;
 
         // Identity hash (8 bytes) - derive from device ID
@@ -371,7 +319,7 @@ export class ReactNativeBLEScanner extends BLEScanner {
         view.setUint32(offset, Math.floor(Date.now() / 1000), false);
         offset += 4;
 
-        // Signature (64 bytes) - empty
+        // Signature (64 bytes) - empty (will fail verification)
         offset += 64;
 
         // Mesh info
@@ -396,7 +344,11 @@ export class ReactNativeBLEScanner extends BLEScanner {
     }
 
     /**
-     * Get discovered devices
+     * Additional helpers for React Native
+     */
+    
+    /**
+     * Get discovered devices (React Native specific)
      */
     getDiscoveredDevices(): Map<string, Device> {
         return new Map(this.discoveredDevices);
@@ -423,6 +375,28 @@ export class ReactNativeBLEScanner extends BLEScanner {
                 bluetoothState: 'Unknown',
                 permissions: false
             };
+        }
+    }
+
+    /**
+     * Pause scanning (React Native specific)
+     */
+    async pauseScanning(): Promise<void> {
+        if (this.scanSubscription) {
+            this.scanSubscription.remove();
+            this.scanSubscription = undefined;
+        }
+        this.bleManager.stopDeviceScan();
+        console.log(' Scanning paused');
+    }
+
+    /**
+     * Resume scanning (React Native specific)
+     */
+    async resumeScanning(): Promise<void> {
+        if (this.currentConfig) {
+            await this.startPlatformScanning(this.currentConfig);
+            console.log(' Scanning resumed');
         }
     }
 }

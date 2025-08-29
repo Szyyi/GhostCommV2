@@ -5,10 +5,8 @@ import { BLEConnectionManager } from './ble/connection';
 import { BLEManager } from './ble/manager';
 import { MeshNetwork } from './ble/mesh';
 import { BLEScanner } from './ble/scanner';
-import { BLEErrorCode, VerificationMethod } from './ble/types';
 import { MessageEncryption, MessageFactory, MessageType } from './crypto/encryption';
 import { GhostKeyPair } from './crypto/keypair';
-import { ConnectionState, CryptoError, DeviceType, MessagePriority, NodeCapability, VerificationStatus } from './types/crypto';
 
 // GhostComm Core Library - Military-Grade P2P Messaging
 export const VERSION = '2.0.0';
@@ -33,10 +31,7 @@ export { MessageType } from './crypto/encryption';
 // TYPE DEFINITIONS - CRYPTOGRAPHY
 // ============================================================================
 
-// Export all types from crypto
-export * from './types/crypto';
-
-// Explicitly export enums (they need explicit export in TypeScript)
+// Explicitly export enums
 export {
     CryptoAlgorithm,
     MessageType as MessageTypeEnum,
@@ -79,16 +74,17 @@ export type {
     IMessageStore,
     MessageFilter,
 
-    // Verification types (Note: VerificationResult and VerificationMethod might not exist in crypto.ts)
-    // VerificationResult,
-    // VerificationMethod,
-
     // Location types
     GeoHash,
 
     // BLE specific types
     BLEAdvertisement,
-    ConnectionInfo
+    ConnectionInfo,
+
+    // Legacy type aliases
+    LegacyKeyPair,
+    LegacyPeerInfo,
+    LegacyGhostMessage
 } from './types/crypto';
 
 // ============================================================================
@@ -106,14 +102,12 @@ export { MeshNetwork } from './ble/mesh';
 // TYPE DEFINITIONS - BLE
 // ============================================================================
 
-// Export all BLE types
-export * from './ble/types';
+// Import BLE types to check they exist
+import { VerificationMethod, BLEErrorCode } from './ble/types';
+import { ConnectionState, CryptoError, DeviceType, MessagePriority, NodeCapability, VerificationStatus } from './types/crypto';
 
-// Explicitly export BLE enums
-export {
-    VerificationMethod,
-    BLEErrorCode
-} from './ble/types';
+// Re-export BLE enums
+export { VerificationMethod, BLEErrorCode } from './ble/types';
 
 // Export BLE types
 export type {
@@ -122,9 +116,6 @@ export type {
     BLESession,
     BLEMessage,
     BLEAdvertisementData,
-
-    // Connection types (Note: ConnectionInfo might conflict with crypto.ts)
-    // ConnectionInfo as BLEConnectionInfo,
 
     // Advertisement types
     IdentityProof,
@@ -143,12 +134,14 @@ export type {
 
     // Security types
     DeviceAttestation,
+    VerificationResult,
 
     // Error types
     BLEError,
 
     // Routing types
     RouteEntry,
+    RouteMetrics,
     RelayStatistics,
 
     // Manager types
@@ -234,7 +227,10 @@ export const SECURITY_CONFIG = {
     // Rate limiting
     MAX_MESSAGES_PER_SECOND: 10,
     MAX_CONNECTIONS: 8,
-    CONNECTION_COOLDOWN: 60 * 1000 // 1 minute
+    CONNECTION_COOLDOWN: 60 * 1000, // 1 minute
+
+    // Security fix: Add signature verification requirement
+    REQUIRE_SIGNATURE_VERIFICATION: true
 };
 
 // ============================================================================
@@ -242,22 +238,22 @@ export const SECURITY_CONFIG = {
 // ============================================================================
 
 /**
-* Check if the core library is properly initialized
-*/
+ * Check if the core library is properly initialized
+ */
 export function isInitialized(): boolean {
     return true;
 }
 
 /**
-* Get the protocol version for compatibility checking
-*/
+ * Get the protocol version for compatibility checking
+ */
 export function getProtocolVersion(): number {
     return SECURITY_CONFIG.PROTOCOL_VERSION;
 }
 
 /**
-* Verify protocol compatibility
-*/
+ * Verify protocol compatibility
+ */
 export function isCompatibleVersion(version: number): boolean {
     return version === SECURITY_CONFIG.PROTOCOL_VERSION;
 }
@@ -267,8 +263,8 @@ export function isCompatibleVersion(version: number): boolean {
 // ============================================================================
 
 /**
-* Base error class for GhostComm
-*/
+ * Base error class for GhostComm
+ */
 export class GhostCommError extends Error {
     constructor(message: string, public code?: string) {
         super(message);
@@ -277,8 +273,8 @@ export class GhostCommError extends Error {
 }
 
 /**
-* Security-specific error
-*/
+ * Security-specific error
+ */
 export class SecurityError extends GhostCommError {
     constructor(message: string, code?: string) {
         super(message, code);
@@ -287,13 +283,29 @@ export class SecurityError extends GhostCommError {
 }
 
 /**
-* Network-specific error
-*/
+ * Network-specific error
+ */
 export class NetworkError extends GhostCommError {
     constructor(message: string, code?: string) {
         super(message, code);
         this.name = 'NetworkError';
     }
+}
+
+// ============================================================================
+// SECURITY WARNING FOR DEVELOPERS
+// ============================================================================
+
+if (typeof process !== 'undefined' && process.env?.NODE_ENV === 'development') {
+    console.warn(`
+╔════════════════════════════════════════════════════════════╗
+║                    ⚠️  SECURITY NOTICE ⚠️                   ║
+║                                                            ║
+║  Signature verification is REQUIRED for all messages.     ║
+║  Messages without verifiable signatures will be rejected. ║
+║  Ensure all nodes have proper key pairs initialised.      ║
+╚════════════════════════════════════════════════════════════╝
+    `);
 }
 
 // ============================================================================
@@ -313,6 +325,7 @@ console.log(`
 ║  ✓ Ed25519 Digital Signatures                            ║
 ║  ✓ 256-bit Security Level                                ║
 ║  ✓ Anti-Tracking & Privacy Protection                    ║
+║  ✓ Mandatory Signature Verification                      ║
 ║                                                            ║
 ║  Protocol Version: ${SECURITY_CONFIG.PROTOCOL_VERSION}                                   ║
 ╚════════════════════════════════════════════════════════════╝
