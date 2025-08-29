@@ -88,21 +88,21 @@ export enum MessageType {
     // Core message types
     DIRECT = 'direct',           // Direct person-to-person message
     BROADCAST = 'broadcast',     // Public message to all nearby nodes
-    GROUP = 'group',            // Group chat message (new)
+    GROUP = 'group',            // Group chat message
 
     // Protocol messages
     RELAY = 'relay',            // Forwarded message in mesh network
     DISCOVERY = 'discovery',     // Node discovery/handshake
-    KEY_EXCHANGE = 'key_exchange', // Diffie-Hellman key exchange (new)
+    KEY_EXCHANGE = 'key_exchange', // Diffie-Hellman key exchange
 
     // Control messages
     ACK = 'ack',                // Message acknowledgment
-    RECEIPT = 'receipt',        // Delivery receipt (new)
-    TYPING = 'typing',          // Typing indicator (new)
+    RECEIPT = 'receipt',        // Delivery receipt
+    TYPING = 'typing',          // Typing indicator
 
     // Security messages
-    KEY_UPDATE = 'key_update',  // Key rotation notification (new)
-    REVOCATION = 'revocation'   // Key revocation (new)
+    KEY_UPDATE = 'key_update',  // Key rotation notification
+    REVOCATION = 'revocation'   // Key revocation
 }
 
 /**
@@ -128,21 +128,21 @@ export interface MessageHeader {
     // Routing information
     sourceId: string;           // Sender's fingerprint
     destinationId?: string;     // Recipient's fingerprint
-    groupId?: string;           // Group identifier (new)
+    groupId?: string;           // Group identifier
 
     // Timing and ordering
     timestamp: number;          // Unix timestamp in ms
-    sequenceNumber: number;     // Message sequence (new)
+    sequenceNumber: number;     // Message sequence
 
     // Mesh routing
     ttl: number;               // Time-to-live in hops
     hopCount: number;          // Current hop count
-    priority: MessagePriority; // Routing priority (new)
+    priority: MessagePriority; // Routing priority
     relayPath: string[];       // Node IDs in relay path
 
     // Security
     signature: Uint8Array;     // Ed25519 signature
-    previousMessageHash?: string; // Chain messages (new)
+    previousMessageHash?: string; // Chain messages
 }
 
 /**
@@ -157,13 +157,13 @@ export interface PlaintextMessage {
 
     // Optional fields
     replyTo?: string;          // Message ID being replied to
-    attachments?: AttachmentMetadata[]; // File attachments (new)
-    mentions?: string[];       // User IDs mentioned (new)
-    reactions?: MessageReaction[]; // Reactions (new)
+    attachments?: AttachmentMetadata[]; // File attachments
+    mentions?: string[];       // User IDs mentioned
+    reactions?: MessageReaction[]; // Reactions
 
     // Security
-    ephemeralExpiry?: number;  // Self-destruct timer (new)
-    burnAfterReading?: boolean; // Delete after reading (new)
+    ephemeralExpiry?: number;  // Self-destruct timer
+    burnAfterReading?: boolean; // Delete after reading
 }
 
 /**
@@ -184,8 +184,8 @@ export interface EncryptedMessage {
 
     // Double Ratchet fields
     ephemeralPublicKey: string;  // Hex-encoded X25519 ephemeral key
-    previousChainLength: number;  // Messages in previous chain (new)
-    messageNumber: number;        // Message number in chain (new)
+    previousChainLength: number;  // Messages in previous chain
+    messageNumber: number;        // Message number in chain
 
     // Encrypted payload
     nonce: string;               // 24-byte nonce for XChaCha20
@@ -193,8 +193,8 @@ export interface EncryptedMessage {
     authTag: string;             // 16-byte Poly1305 MAC
 
     // Optional group message fields
-    groupKeyId?: string;         // Group key version (new)
-    senderKeyShare?: string;     // Sender's key for group (new)
+    groupKeyId?: string;         // Group key version
+    senderKeyShare?: string;     // Sender's key for group
 }
 
 // ===== ADDITIONAL TYPES =====
@@ -235,18 +235,18 @@ export interface MeshNode {
 
     // Network status
     lastSeen: number;
-    firstSeen: number;          // When first discovered (new)
-    isOnline: boolean;          // Currently reachable (new)
+    firstSeen: number;          // When first discovered
+    isOnline: boolean;          // Currently reachable
 
     // Capabilities
-    protocolVersion: number;    // Supported protocol (new)
-    supportedAlgorithms: CryptoAlgorithm[]; // Crypto support (new)
-    capabilities: NodeCapability[]; // Feature support (new)
+    protocolVersion: number;    // Supported protocol
+    supportedAlgorithms: CryptoAlgorithm[]; // Crypto support
+    capabilities: NodeCapability[]; // Feature support
 
     // Mesh metrics
     signalStrength?: number;    // RSSI value
     batteryLevel?: number;      // Battery percentage
-    messageStats?: {            // Statistics (new)
+    messageStats?: {            // Statistics
         sent: number;
         received: number;
         relayed: number;
@@ -254,14 +254,14 @@ export interface MeshNode {
     };
 
     // Trust metrics
-    trustScore?: number;        // 0-100 trust level (new)
-    verificationStatus?: VerificationStatus; // Verification state (new)
-    verifiedBy?: string[];      // Node IDs that verified (new)
+    trustScore?: number;        // 0-100 trust level
+    verificationStatus?: VerificationStatus; // Verification state
+    verifiedBy?: string[];      // Node IDs that verified
 
     // Optional metadata
     deviceName?: string;
-    deviceType?: DeviceType;   // Phone, tablet, IoT (new)
-    location?: GeoHash;        // Coarse location (new)
+    deviceType?: DeviceType;   // Phone, tablet, IoT
+    location?: GeoHash;        // Coarse location
 }
 
 /**
@@ -318,7 +318,7 @@ export interface RouteInfo {
     latency?: number;          // Average latency in ms
     bandwidth?: number;        // Estimated bandwidth
     lastUpdated: number;
-    alternativeRoutes?: RouteInfo[]; // Backup routes (new)
+    alternativeRoutes?: RouteInfo[]; // Backup routes
 }
 
 /**
@@ -341,26 +341,28 @@ export interface QueuedMessage {
  * Enhanced key pair interface with all security operations
  */
 export interface IGhostKeyPair {
-    export: any;
-    getShortFingerprint(): string;
+    // Key export with optional encryption
+    export(password?: string): ExportedKeys;
+    
     // Key access
     getFingerprint(): string;                    // 256-bit fingerprint
+    getShortFingerprint(): string;              // Truncated fingerprint for display
     getIdentityPublicKey(): Uint8Array;
     getEncryptionPublicKey(): Uint8Array;
     getEncryptionPrivateKey(): Uint8Array;
 
     // Cryptographic operations
-    signMessage(message: Uint8Array): Uint8Array;
-    verifySignature(message: Uint8Array, signature: Uint8Array, publicKey: Uint8Array): boolean;
+    signMessage(message: Uint8Array | string): Uint8Array;
+    verifySignature(message: Uint8Array | string, signature: Uint8Array, publicKey: Uint8Array): boolean;
     performKeyExchange(theirPublicKey: Uint8Array, salt?: Uint8Array): Uint8Array;
 
-    // Double Ratchet operations (new)
+    // Double Ratchet operations
     initializeSession(theirPublicKey: Uint8Array): SessionKeys;
     ratchetSession(session: SessionKeys, theirEphemeralKey?: Uint8Array): SessionKeys;
 
     // Key management
-    rotateEncryptionKey(): KeyPair;             // Generate new encryption key (new)
-    generatePreKeys(count: number): PreKey[];    // Generate pre-keys (new)
+    rotateEncryptionKey(): KeyPair;             // Generate new encryption key
+    generatePreKeys(count: number): PreKey[];    // Generate pre-keys
 
     // Import/Export
     exportKeys(): ExportedKeys;
@@ -375,12 +377,12 @@ export interface IGhostKeyPair {
  * Exported key format
  */
 export interface ExportedKeys {
-    publicKey: any;
     version: number;
     identityPrivate: string;
     identityPublic: string;
     encryptionPrivate: string;
     encryptionPublic: string;
+    publicKey?: string;  // For backward compatibility
     preKeys?: Array<{
         keyId: number;
         private: string;
@@ -412,7 +414,7 @@ export interface IMessageEncryption {
     encryptMessage(message: PlaintextMessage, senderKeyPair: IGhostKeyPair, recipientPublicKey: Uint8Array): Promise<EncryptedMessage>;
     decryptMessage(encryptedMessage: EncryptedMessage, recipientKeyPair: IGhostKeyPair): Promise<PlaintextMessage>;
 
-    // Group messaging (new)
+    // Group messaging
     encryptGroupMessage(message: PlaintextMessage, senderKeyPair: IGhostKeyPair, groupKey: Uint8Array): Promise<EncryptedMessage>;
     decryptGroupMessage(encryptedMessage: EncryptedMessage, groupKey: Uint8Array): Promise<PlaintextMessage>;
 
@@ -420,7 +422,7 @@ export interface IMessageEncryption {
     createBroadcastMessage(message: PlaintextMessage, senderKeyPair: IGhostKeyPair): Promise<EncryptedMessage>;
     decryptBroadcastMessage(encryptedMessage: EncryptedMessage, senderPublicKey: Uint8Array): Promise<PlaintextMessage>;
 
-    // Session management (new)
+    // Session management
     establishSession(senderKeyPair: IGhostKeyPair, recipientPublicKey: Uint8Array): Promise<SessionKeys>;
     encryptWithSession(message: PlaintextMessage, session: SessionKeys): Promise<EncryptedMessage>;
     decryptWithSession(encryptedMessage: EncryptedMessage, session: SessionKeys): Promise<PlaintextMessage>;
@@ -443,22 +445,22 @@ export interface IMessageStore {
     getMessagesForNode(nodeId: string): Promise<EncryptedMessage[]>;
     removeMessage(messageId: string): Promise<void>;
 
-    // Batch operations (new)
+    // Batch operations
     storeMessages(messages: EncryptedMessage[]): Promise<void>;
     removeMessages(messageIds: string[]): Promise<void>;
 
-    // Query operations (new)
+    // Query operations
     queryMessages(filter: MessageFilter): Promise<EncryptedMessage[]>;
     getMessagesByTimeRange(start: number, end: number): Promise<EncryptedMessage[]>;
     getMessagesByPriority(priority: MessagePriority): Promise<EncryptedMessage[]>;
 
     // Maintenance
     pruneExpiredMessages(): Promise<number>;
-    compactStorage(): Promise<void>;              // Defragment storage (new)
+    compactStorage(): Promise<void>;              // Defragment storage
 
     // Statistics
     getStorageStats(): Promise<StorageStats>;
-    getMessageStats(): Promise<MessageStats>;     // Message statistics (new)
+    getMessageStats(): Promise<MessageStats>;     // Message statistics
 }
 
 /**
@@ -527,7 +529,7 @@ export interface NetworkStats {
     networkDensity: number;    // Nodes per area
     networkReachability: number; // Percentage of reachable nodes
 
-    // Bandwidth metrics (new)
+    // Bandwidth metrics
     bytesTransmitted: number;
     bytesReceived: number;
     averageThroughput: number;
@@ -616,7 +618,8 @@ export enum CryptoError {
     INVALID_MESSAGE_FORMAT = 'INVALID_MESSAGE_FORMAT',
     MESSAGE_EXPIRED = 'MESSAGE_EXPIRED',
     REPLAY_DETECTED = 'REPLAY_DETECTED',
-    SESSION_NOT_FOUND = 'SESSION_NOT_FOUND'
+    SESSION_NOT_FOUND = 'SESSION_NOT_FOUND',
+    NO_SENDER_KEY = 'NO_SENDER_KEY'
 }
 
 /**

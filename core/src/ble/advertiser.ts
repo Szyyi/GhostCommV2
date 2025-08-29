@@ -1,9 +1,10 @@
 // core/src/ble/advertiser.ts
-// Enhanced BLE Advertiser with cryptographic signatures and anti-tracking
+// Enhanced BLE Advertiser with Protocol v2 cryptographic signatures
 
 import {
     BLEAdvertisementData,
     BLE_CONFIG,
+    BLE_SECURITY_CONFIG,
     IdentityProof,
     PreKeyBundle,
     MeshAdvertisement,
@@ -24,6 +25,7 @@ interface AdvertisementPacket {
     flags: number;                    // Bit flags for capabilities
     ephemeralId: Uint8Array;          // 16 bytes rotating ID
     identityHash: Uint8Array;         // 8 bytes identity hash
+    publicKey?: Uint8Array;           // Protocol v2: Full public key (32 bytes)
     sequenceNumber: number;           // 4 bytes sequence
     timestamp: number;                // 4 bytes timestamp (seconds since epoch)
     signature: Uint8Array;            // 64 bytes Ed25519 signature
@@ -39,6 +41,7 @@ interface CompactMeshInfo {
     queueSize: number;                // 1 byte (0-255)
     batteryLevel: number;             // 1 byte (0-100)
     flags: number;                    // 1 byte flags
+    protocolVersion: number;          // 1 byte (Protocol v2)
 }
 
 /**
@@ -52,7 +55,7 @@ interface RotationSchedule {
 }
 
 /**
- * Enhanced BLE Advertiser with security features
+ * Enhanced BLE Advertiser with Protocol v2 security
  */
 export abstract class BLEAdvertiser {
     // State management
@@ -77,7 +80,7 @@ export abstract class BLEAdvertiser {
     // Rate limiting
     private advertisementCount: number = 0;
     private rateLimitWindow: number = 60000; // 1 minute
-    private maxAdvertisementsPerWindow: number = 30; // Reduced from 60 to prevent spam
+    private maxAdvertisementsPerWindow: number = 30;
 
     // Performance tracking
     private statistics = {
@@ -86,6 +89,7 @@ export abstract class BLEAdvertiser {
         failedAdvertisements: 0,
         rotations: 0,
         averageInterval: 0,
+        protocolVersion: BLE_SECURITY_CONFIG.PROTOCOL_VERSION,
         lastError: null as Error | null
     };
 
@@ -108,21 +112,21 @@ export abstract class BLEAdvertiser {
     }>;
 
     /**
-     * Start secure advertising with signatures and rotation
+     * Start secure advertising with Protocol v2 signatures
      */
     async startAdvertising(data: BLEAdvertisementData): Promise<void> {
         if (this.isAdvertising && !this.isPaused) {
-            console.log('⚠️ Already advertising, updating advertisement data');
+            console.log('Already advertising, updating advertisement data');
             await this.updateAdvertisement(data);
             return;
         }
 
         try {
-            console.log(`📡 Starting secure BLE advertisement`);
+            console.log(`Starting secure BLE advertisement (Protocol v${BLE_SECURITY_CONFIG.PROTOCOL_VERSION})`);
 
-            // Validate and enhance advertisement data
+            // Validate and enhance advertisement data for Protocol v2
             this.validateAdvertisementData(data);
-            const enhancedData = await this.enhanceAdvertisementData(data);
+            const enhancedData = await this.enhanceAdvertisementDataV2(data);
 
             // Create advertisement packet
             const packet = await this.createAdvertisementPacket(enhancedData);
@@ -132,11 +136,10 @@ export abstract class BLEAdvertiser {
             const packetBytes = this.serializePacket(packet);
 
             if (packetBytes.length > capabilities.maxAdvertisementSize) {
-                // Use extended advertising if available
                 if (!capabilities.supportsExtendedAdvertising) {
                     throw new Error(`Advertisement too large: ${packetBytes.length} > ${capabilities.maxAdvertisementSize}`);
                 }
-                console.log('📦 Using extended advertising for large packet');
+                console.log('Using extended advertising for large packet');
             }
 
             // Start platform advertising
@@ -159,10 +162,10 @@ export abstract class BLEAdvertiser {
             this.statistics.totalAdvertisements++;
             this.statistics.successfulAdvertisements++;
 
-            console.log('✅ Secure BLE advertising started successfully');
+            console.log('Secure BLE advertising started successfully');
 
         } catch (error) {
-            console.error('❌ Failed to start BLE advertising:', error);
+            console.error('Failed to start BLE advertising:', error);
             this.statistics.failedAdvertisements++;
             this.statistics.lastError = error as Error;
             this.isAdvertising = false;
@@ -171,111 +174,13 @@ export abstract class BLEAdvertiser {
     }
 
     /**
-     * Stop advertising
+     * Enhance advertisement data with Protocol v2 security features
      */
-    async stopAdvertising(): Promise<void> {
-        if (!this.isAdvertising) {
-            return;
-        }
+    private async enhanceAdvertisementDataV2(data: BLEAdvertisementData): Promise<BLEAdvertisementData> {
+        // Ensure Protocol v2
+        data.version = BLE_SECURITY_CONFIG.PROTOCOL_VERSION;
+        data.protocolVersion = BLE_SECURITY_CONFIG.PROTOCOL_VERSION;
 
-        try {
-            console.log('🛑 Stopping BLE advertising...');
-
-            // Stop timers
-            this.stopPeriodicAdvertising();
-            this.stopRotationSchedule();
-
-            // Stop platform advertising
-            await this.stopPlatformAdvertising();
-
-            // Clear state
-            this.isAdvertising = false;
-            this.isPaused = false;
-            this.currentAdvertisement = undefined;
-            this.currentPacket = undefined;
-
-            // Clear caches
-            this.signatureCache.clear();
-
-            console.log('✅ BLE advertising stopped');
-
-        } catch (error) {
-            console.error('❌ Failed to stop BLE advertising:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Pause advertising temporarily
-     */
-    async pauseAdvertising(): Promise<void> {
-        if (!this.isAdvertising || this.isPaused) {
-            return;
-        }
-
-        console.log('⏸️ Pausing BLE advertising');
-        this.stopPeriodicAdvertising();
-        await this.stopPlatformAdvertising();
-        this.isPaused = true;
-    }
-
-    /**
-     * Resume advertising
-     */
-    async resumeAdvertising(): Promise<void> {
-        if (!this.isAdvertising || !this.isPaused) {
-            return;
-        }
-
-        console.log('▶️ Resuming BLE advertising');
-
-        if (this.currentPacket) {
-            const packetBytes = this.serializePacket(this.currentPacket);
-            await this.startPlatformAdvertising(packetBytes);
-            this.startPeriodicAdvertising();
-            this.isPaused = false;
-        }
-    }
-
-    /**
-     * Update advertisement with new data
-     */
-    async updateAdvertisement(data: BLEAdvertisementData): Promise<void> {
-        if (!this.isAdvertising) {
-            this.currentAdvertisement = data;
-            return;
-        }
-
-        try {
-            console.log(`🔄 Updated advertisement (sequence: ${data.sequenceNumber || this.sequenceNumber})`);
-
-            // Validate and enhance new data
-            this.validateAdvertisementData(data);
-            const enhancedData = await this.enhanceAdvertisementData(data);
-
-            // Create new packet
-            const packet = await this.createAdvertisementPacket(enhancedData);
-            const packetBytes = this.serializePacket(packet);
-
-            // Update platform advertising
-            await this.updatePlatformAdvertising(packetBytes);
-
-            // Update state
-            this.currentAdvertisement = enhancedData;
-            this.currentPacket = packet;
-
-            console.log('✅ Advertisement updated successfully');
-
-        } catch (error) {
-            console.error('❌ Failed to update advertisement:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Enhance advertisement data with security features
-     */
-    private async enhanceAdvertisementData(data: BLEAdvertisementData): Promise<BLEAdvertisementData> {
         // Add sequence number for replay protection
         if (!data.sequenceNumber) {
             data.sequenceNumber = this.getNextSequenceNumber();
@@ -284,65 +189,35 @@ export abstract class BLEAdvertiser {
         // Ensure timestamp is current
         data.timestamp = Date.now();
 
-        // Add protocol version
-        if (!data.version) {
-            data.version = 2;
-        }
-
         // Generate ephemeral ID if not present
         if (!data.ephemeralId) {
             data.ephemeralId = this.generateEphemeralId();
         }
 
-        // Sign the advertisement if we have a key pair
-        if (this.keyPair && !data.identityProof.signature) {
-            data.identityProof.signature = await this.signAdvertisement(data);
+        // Protocol v2: Ensure full public key is included
+        if (this.keyPair && !data.identityProof.publicKey) {
+            const identityPublicKey = this.keyPair.getIdentityPublicKey();
+            data.identityProof.publicKey = this.bytesToHex(identityPublicKey);
+        }
+
+        // Sign the advertisement with Protocol v2 requirements
+        if (this.keyPair) {
+            data.identityProof.signature = await this.signAdvertisementV2(data);
         }
 
         return data;
     }
 
     /**
-     * Create advertisement packet for transmission
+     * Sign advertisement with Protocol v2 requirements
      */
-    private async createAdvertisementPacket(data: BLEAdvertisementData): Promise<AdvertisementPacket> {
-        // Create capability flags
-        const flags = this.createCapabilityFlags(data.capabilities);
-
-        // Create compact mesh info
-        const meshInfo: CompactMeshInfo = {
-            nodeCount: Math.min(255, data.meshInfo.nodeCount),
-            queueSize: Math.min(255, data.meshInfo.messageQueueSize),
-            batteryLevel: data.batteryLevel || 100,
-            flags: this.createMeshFlags(data)
-        };
-
-        // Create packet
-        const packet: AdvertisementPacket = {
-            version: data.version,
-            flags,
-            ephemeralId: this.hexToBytes(data.ephemeralId),
-            identityHash: this.hexToBytes(data.identityProof.publicKeyHash).slice(0, 8),
-            sequenceNumber: data.sequenceNumber,
-            timestamp: Math.floor(data.timestamp / 1000),
-            signature: this.hexToBytes(data.identityProof.signature),
-            meshInfo,
-            extendedData: await this.createExtendedData(data)
-        };
-
-        return packet;
-    }
-
-    /**
-     * Sign advertisement for authenticity
-     */
-    private async signAdvertisement(data: BLEAdvertisementData): Promise<string> {
+    private async signAdvertisementV2(data: BLEAdvertisementData): Promise<string> {
         if (!this.keyPair) {
-            throw new Error('Key pair required for signing');
+            throw new Error('Key pair required for Protocol v2 signing');
         }
 
-        // Create signing data
-        const signingData = this.createSigningData(data);
+        // Create signing data including all Protocol v2 fields
+        const signingData = this.createSigningDataV2(data);
 
         // Check cache
         const cacheKey = this.hashData(signingData);
@@ -368,15 +243,18 @@ export abstract class BLEAdvertiser {
     }
 
     /**
-     * Create data for signing
+     * Create data for Protocol v2 signing
      */
-    private createSigningData(data: BLEAdvertisementData): Uint8Array {
+    private createSigningDataV2(data: BLEAdvertisementData): Uint8Array {
+        // Include all critical fields for Protocol v2
         const parts = [
             data.ephemeralId,
             data.identityProof.publicKeyHash,
+            data.identityProof.publicKey || '', // Full public key for v2
             data.identityProof.timestamp.toString(),
             data.identityProof.nonce,
-            data.sequenceNumber.toString()
+            data.sequenceNumber.toString(),
+            data.version.toString()
         ];
 
         const combined = parts.join('-');
@@ -384,11 +262,54 @@ export abstract class BLEAdvertiser {
     }
 
     /**
-     * Serialize packet for transmission
+     * Create advertisement packet for transmission
+     */
+    private async createAdvertisementPacket(data: BLEAdvertisementData): Promise<AdvertisementPacket> {
+        // Create capability flags
+        const flags = this.createCapabilityFlags(data.capabilities);
+
+        // Create compact mesh info with Protocol version
+        const meshInfo: CompactMeshInfo = {
+            nodeCount: Math.min(255, data.meshInfo.nodeCount),
+            queueSize: Math.min(255, data.meshInfo.messageQueueSize),
+            batteryLevel: data.batteryLevel || 100,
+            flags: this.createMeshFlags(data),
+            protocolVersion: BLE_SECURITY_CONFIG.PROTOCOL_VERSION
+        };
+
+        // Create packet with Protocol v2 fields
+        const packet: AdvertisementPacket = {
+            version: BLE_SECURITY_CONFIG.PROTOCOL_VERSION,
+            flags,
+            ephemeralId: this.hexToBytes(data.ephemeralId),
+            identityHash: this.hexToBytes(data.identityProof.publicKeyHash).slice(0, 8),
+            sequenceNumber: data.sequenceNumber,
+            timestamp: Math.floor(data.timestamp / 1000),
+            signature: this.hexToBytes(data.identityProof.signature),
+            meshInfo,
+            extendedData: await this.createExtendedDataV2(data)
+        };
+
+        // Protocol v2: Include full public key if available
+        if (data.identityProof.publicKey) {
+            packet.publicKey = this.hexToBytes(data.identityProof.publicKey).slice(0, 32);
+        }
+
+        return packet;
+    }
+
+    /**
+     * Serialize packet for transmission with Protocol v2
      */
     private serializePacket(packet: AdvertisementPacket): Uint8Array {
         // Calculate packet size
-        let size = 1 + 1 + 16 + 8 + 4 + 4 + 64 + 4; // Fixed fields
+        let size = 1 + 1 + 16 + 8 + 4 + 4 + 64 + 5; // Fixed fields (mesh info now 5 bytes)
+        
+        // Protocol v2: Add space for public key if present
+        if (packet.publicKey) {
+            size += 32;
+        }
+        
         if (packet.extendedData) {
             size += packet.extendedData.length;
         }
@@ -411,6 +332,12 @@ export abstract class BLEAdvertiser {
         buffer.set(packet.identityHash, offset);
         offset += 8;
 
+        // Protocol v2: Public key if present (32 bytes)
+        if (packet.publicKey) {
+            buffer.set(packet.publicKey, offset);
+            offset += 32;
+        }
+
         // Sequence number (4 bytes)
         view.setUint32(offset, packet.sequenceNumber, false);
         offset += 4;
@@ -423,11 +350,12 @@ export abstract class BLEAdvertiser {
         buffer.set(packet.signature, offset);
         offset += 64;
 
-        // Mesh info (4 bytes)
+        // Mesh info (5 bytes - added protocol version)
         buffer[offset++] = packet.meshInfo.nodeCount;
         buffer[offset++] = packet.meshInfo.queueSize;
         buffer[offset++] = packet.meshInfo.batteryLevel;
         buffer[offset++] = packet.meshInfo.flags;
+        buffer[offset++] = packet.meshInfo.protocolVersion;
 
         // Extended data (variable)
         if (packet.extendedData) {
@@ -438,11 +366,11 @@ export abstract class BLEAdvertiser {
     }
 
     /**
-     * Parse advertisement packet
+     * Parse advertisement packet with Protocol v2 support
      */
     static parseAdvertisementPacket(data: Uint8Array): AdvertisementPacket | null {
         try {
-            if (data.length < 108) { // Minimum packet size
+            if (data.length < 109) { // Minimum packet size (increased for protocol version)
                 return null;
             }
 
@@ -463,6 +391,13 @@ export abstract class BLEAdvertiser {
             const identityHash = data.slice(offset, offset + 8);
             offset += 8;
 
+            // Protocol v2: Check if public key is included
+            let publicKey: Uint8Array | undefined;
+            if (version >= 2 && data.length >= offset + 32 + 76) { // Space for public key + remaining fields
+                publicKey = data.slice(offset, offset + 32);
+                offset += 32;
+            }
+
             // Sequence number
             const sequenceNumber = view.getUint32(offset, false);
             offset += 4;
@@ -475,12 +410,13 @@ export abstract class BLEAdvertiser {
             const signature = data.slice(offset, offset + 64);
             offset += 64;
 
-            // Mesh info
+            // Mesh info (5 bytes for v2)
             const meshInfo: CompactMeshInfo = {
                 nodeCount: data[offset++],
                 queueSize: data[offset++],
                 batteryLevel: data[offset++],
-                flags: data[offset++]
+                flags: data[offset++],
+                protocolVersion: version >= 2 ? data[offset++] : 1
             };
 
             // Extended data
@@ -494,6 +430,7 @@ export abstract class BLEAdvertiser {
                 flags,
                 ephemeralId,
                 identityHash,
+                publicKey,
                 sequenceNumber,
                 timestamp,
                 signature,
@@ -502,18 +439,18 @@ export abstract class BLEAdvertiser {
             };
 
         } catch (error) {
-            console.error('❌ Error parsing advertisement packet:', error);
+            console.error('Error parsing advertisement packet:', error);
             return null;
         }
     }
 
     /**
-     * Validate advertisement data
+     * Validate advertisement data for Protocol v2
      */
     private validateAdvertisementData(data: BLEAdvertisementData): void {
         // Version check
-        if (!data.version || data.version < 2) {
-            throw new Error('Advertisement version must be 2 or higher');
+        if (!data.version || data.version < BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
+            console.warn(`Advertisement version ${data.version} < required v${BLE_SECURITY_CONFIG.PROTOCOL_VERSION}`);
         }
 
         // Identity proof validation
@@ -525,6 +462,11 @@ export abstract class BLEAdvertiser {
             throw new Error('Invalid public key hash in identity proof');
         }
 
+        // Protocol v2: Warn if public key is missing
+        if (BLE_SECURITY_CONFIG.REQUIRE_SIGNATURE_VERIFICATION && !data.identityProof.publicKey) {
+            console.warn('Protocol v2 requires full public key in identity proof');
+        }
+
         if (!data.identityProof.nonce || data.identityProof.nonce.length < 16) {
             throw new Error('Invalid nonce in identity proof');
         }
@@ -533,7 +475,7 @@ export abstract class BLEAdvertiser {
         const now = Date.now();
         const timeDiff = Math.abs(now - data.timestamp);
         if (timeDiff > 300000) { // 5 minutes
-            console.warn('⚠️ Advertisement timestamp differs significantly from current time');
+            console.warn('Advertisement timestamp differs significantly from current time');
         }
 
         // Capabilities validation
@@ -553,8 +495,142 @@ export abstract class BLEAdvertiser {
     }
 
     /**
-     * Validate pre-key bundle
+     * Create extended data for Protocol v2
      */
+    private async createExtendedDataV2(data: BLEAdvertisementData): Promise<Uint8Array | undefined> {
+        const extended: any = {};
+
+        // Include pre-key bundle if present
+        if (data.identityProof.preKeyBundle) {
+            extended.preKeyBundle = data.identityProof.preKeyBundle;
+        }
+
+        // Include supported algorithms for v2
+        extended.supportedAlgorithms = [
+            CryptoAlgorithm.ED25519,
+            CryptoAlgorithm.X25519,
+            CryptoAlgorithm.XCHACHA20_POLY1305
+        ];
+
+        // Include protocol requirements
+        extended.protocolRequirements = {
+            requireSignatureVerification: BLE_SECURITY_CONFIG.REQUIRE_SIGNATURE_VERIFICATION,
+            requireMessageChaining: BLE_SECURITY_CONFIG.REQUIRE_MESSAGE_CHAINING,
+            requireSequenceNumbers: BLE_SECURITY_CONFIG.REQUIRE_SEQUENCE_NUMBERS
+        };
+
+        if (Object.keys(extended).length > 0) {
+            const extendedData = JSON.stringify(extended);
+            return new TextEncoder().encode(extendedData);
+        }
+
+        return undefined;
+    }
+
+    /**
+     * Update advertisement with Protocol v2 requirements
+     */
+    async updateAdvertisement(data: BLEAdvertisementData): Promise<void> {
+        if (!this.isAdvertising) {
+            this.currentAdvertisement = data;
+            return;
+        }
+
+        try {
+            console.log(`Updating advertisement (Protocol v${data.version}, sequence: ${data.sequenceNumber || this.sequenceNumber})`);
+
+            // Validate and enhance new data for Protocol v2
+            this.validateAdvertisementData(data);
+            const enhancedData = await this.enhanceAdvertisementDataV2(data);
+
+            // Create new packet
+            const packet = await this.createAdvertisementPacket(enhancedData);
+            const packetBytes = this.serializePacket(packet);
+
+            // Update platform advertising
+            await this.updatePlatformAdvertising(packetBytes);
+
+            // Update state
+            this.currentAdvertisement = enhancedData;
+            this.currentPacket = packet;
+
+            console.log('Advertisement updated successfully');
+
+        } catch (error) {
+            console.error('Failed to update advertisement:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Rotate ephemeral ID for privacy
+     */
+    private async rotateEphemeralId(): Promise<void> {
+        if (!this.currentAdvertisement) {
+            return;
+        }
+
+        console.log('Rotating ephemeral ID for privacy');
+
+        // Generate new ephemeral ID
+        const newEphemeralId = this.generateEphemeralId();
+
+        // Update advertisement
+        this.currentAdvertisement.ephemeralId = newEphemeralId;
+        this.currentAdvertisement.sequenceNumber = this.getNextSequenceNumber();
+
+        // Re-sign with new ephemeral ID using Protocol v2
+        if (this.keyPair) {
+            this.currentAdvertisement.identityProof.signature = await this.signAdvertisementV2(this.currentAdvertisement);
+        }
+
+        // Update advertisement
+        await this.updateAdvertisement(this.currentAdvertisement);
+
+        // Update statistics
+        this.statistics.rotations++;
+
+        // Schedule next rotation
+        this.setupRotationSchedule(this.currentAdvertisement);
+    }
+
+    /**
+     * Stop advertising
+     */
+    async stopAdvertising(): Promise<void> {
+        if (!this.isAdvertising) {
+            return;
+        }
+
+        try {
+            console.log('Stopping BLE advertising...');
+
+            // Stop timers
+            this.stopPeriodicAdvertising();
+            this.stopRotationSchedule();
+
+            // Stop platform advertising
+            await this.stopPlatformAdvertising();
+
+            // Clear state
+            this.isAdvertising = false;
+            this.isPaused = false;
+            this.currentAdvertisement = undefined;
+            this.currentPacket = undefined;
+
+            // Clear caches
+            this.signatureCache.clear();
+
+            console.log('BLE advertising stopped');
+
+        } catch (error) {
+            console.error('Failed to stop BLE advertising:', error);
+            throw error;
+        }
+    }
+
+    // ... [Include all other methods unchanged from original] ...
+
     private validatePreKeyBundle(bundle: PreKeyBundle): void {
         if (!bundle.identityKey || bundle.identityKey.length !== 64) {
             throw new Error('Invalid identity key in pre-key bundle');
@@ -573,19 +649,13 @@ export abstract class BLEAdvertiser {
         }
     }
 
-    /**
-     * Set up ephemeral ID rotation schedule
-     */
     private setupRotationSchedule(data: BLEAdvertisementData): void {
-        // Clear existing timer
         this.stopRotationSchedule();
 
-        // Calculate rotation interval with randomization
         const baseInterval = BLE_CONFIG.ADDRESS_ROTATION_INTERVAL;
         const randomization = Math.random() * BLE_CONFIG.ADVERTISEMENT_RANDOMIZATION;
         const interval = baseInterval + randomization;
 
-        // Set up rotation
         this.rotationSchedule = {
             ephemeralId: data.ephemeralId,
             validFrom: Date.now(),
@@ -593,17 +663,13 @@ export abstract class BLEAdvertiser {
             nextRotation: Date.now() + interval
         };
 
-        // Schedule rotation
         this.rotationTimer = setTimeout(() => {
             this.rotateEphemeralId();
         }, interval);
 
-        console.log(`🔄 Ephemeral ID rotation scheduled for ${new Date(this.rotationSchedule.nextRotation).toLocaleTimeString()}`);
+        console.log(`Ephemeral ID rotation scheduled for ${new Date(this.rotationSchedule.nextRotation).toLocaleTimeString()}`);
     }
 
-    /**
-     * Stop rotation schedule
-     */
     private stopRotationSchedule(): void {
         if (this.rotationTimer) {
             clearTimeout(this.rotationTimer);
@@ -612,87 +678,39 @@ export abstract class BLEAdvertiser {
         this.rotationSchedule = undefined;
     }
 
-    /**
-     * Rotate ephemeral ID for privacy
-     */
-    private async rotateEphemeralId(): Promise<void> {
-        if (!this.currentAdvertisement) {
-            return;
-        }
-
-        console.log('🔄 Rotating ephemeral ID for privacy');
-
-        // Generate new ephemeral ID
-        const newEphemeralId = this.generateEphemeralId();
-
-        // Update advertisement
-        this.currentAdvertisement.ephemeralId = newEphemeralId;
-        this.currentAdvertisement.sequenceNumber = this.getNextSequenceNumber();
-
-        // Re-sign with new ephemeral ID
-        if (this.keyPair) {
-            this.currentAdvertisement.identityProof.signature = await this.signAdvertisement(this.currentAdvertisement);
-        }
-
-        // Update advertisement
-        await this.updateAdvertisement(this.currentAdvertisement);
-
-        // Update statistics
-        this.statistics.rotations++;
-
-        // Schedule next rotation
-        this.setupRotationSchedule(this.currentAdvertisement);
-    }
-
-    /**
-     * Start periodic advertising - FIXED VERSION
-     */
     private startPeriodicAdvertising(): void {
-        // Clear existing timer
         this.stopPeriodicAdvertising();
-
-        // Use setInterval for consistent periodic updates
         this.advertisementTimer = setInterval(async () => {
             await this.performPeriodicAdvertisement();
         }, this.advertisementInterval);
     }
 
-    /**
-     * Stop periodic advertising
-     */
     private stopPeriodicAdvertising(): void {
         if (this.advertisementTimer) {
-            clearInterval(this.advertisementTimer); // Changed from clearTimeout
+            clearInterval(this.advertisementTimer);
             this.advertisementTimer = undefined;
         }
     }
 
-    /**
-     * Perform periodic advertisement update - FIXED VERSION
-     */
     private async performPeriodicAdvertisement(): Promise<void> {
         if (!this.isAdvertising || this.isPaused) {
             return;
         }
 
         try {
-            // Check rate limiting
             if (!this.checkRateLimit()) {
-                console.warn('⚠️ Advertisement rate limit reached, skipping');
+                console.warn('Advertisement rate limit reached, skipping');
                 return;
             }
 
-            // Update mesh info
             if (this.currentAdvertisement) {
                 this.currentAdvertisement.meshInfo.nodeCount = await this.getNodeCount();
                 this.currentAdvertisement.meshInfo.messageQueueSize = await this.getQueueSize();
                 this.currentAdvertisement.sequenceNumber = this.getNextSequenceNumber();
 
-                // Update advertisement
                 await this.updateAdvertisement(this.currentAdvertisement);
             }
 
-            // Update statistics
             const now = Date.now();
             const interval = now - this.lastAdvertisementTime;
             this.statistics.averageInterval =
@@ -700,15 +718,37 @@ export abstract class BLEAdvertiser {
             this.lastAdvertisementTime = now;
 
         } catch (error) {
-            console.error('❌ Periodic advertisement failed:', error);
+            console.error('Periodic advertisement failed:', error);
             this.statistics.failedAdvertisements++;
         }
-        // Removed the finally block that was causing recursive timer creation
     }
 
-    /**
-     * Create capability flags byte
-     */
+    async pauseAdvertising(): Promise<void> {
+        if (!this.isAdvertising || this.isPaused) {
+            return;
+        }
+
+        console.log('Pausing BLE advertising');
+        this.stopPeriodicAdvertising();
+        await this.stopPlatformAdvertising();
+        this.isPaused = true;
+    }
+
+    async resumeAdvertising(): Promise<void> {
+        if (!this.isAdvertising || !this.isPaused) {
+            return;
+        }
+
+        console.log('Resuming BLE advertising');
+
+        if (this.currentPacket) {
+            const packetBytes = this.serializePacket(this.currentPacket);
+            await this.startPlatformAdvertising(packetBytes);
+            this.startPeriodicAdvertising();
+            this.isPaused = false;
+        }
+    }
+
     private createCapabilityFlags(capabilities: NodeCapability[]): number {
         let flags = 0;
 
@@ -728,54 +768,35 @@ export abstract class BLEAdvertiser {
         return flags;
     }
 
-    /**
-     * Create mesh flags byte
-     */
     private createMeshFlags(data: BLEAdvertisementData): number {
         let flags = 0;
 
-        // Bit 0: Has pre-keys
         if (data.identityProof.preKeyBundle) {
             flags |= 0x01;
         }
 
-        // Bit 1: Accepting connections
-        flags |= 0x02;
+        flags |= 0x02; // Accepting connections
 
-        // Bit 2: Low power mode
         if (data.batteryLevel && data.batteryLevel < 20) {
             flags |= 0x04;
         }
 
-        // Bit 3: Has queued messages
         if (data.meshInfo.messageQueueSize > 0) {
             flags |= 0x08;
+        }
+
+        // Protocol v2 flag
+        if (data.version >= BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
+            flags |= 0x10;
         }
 
         return flags;
     }
 
-    /**
-     * Create extended data for large advertisements
-     */
-    private async createExtendedData(data: BLEAdvertisementData): Promise<Uint8Array | undefined> {
-        // Include pre-key bundle if present and space allows
-        if (data.identityProof.preKeyBundle) {
-            const bundleData = JSON.stringify(data.identityProof.preKeyBundle);
-            return new TextEncoder().encode(bundleData);
-        }
-
-        return undefined;
-    }
-
-    /**
-     * Check rate limiting
-     */
     private checkRateLimit(): boolean {
         const now = Date.now();
         const windowStart = now - this.rateLimitWindow;
 
-        // Reset counter if window expired
         if (this.lastAdvertisementTime < windowStart) {
             this.advertisementCount = 0;
         }
@@ -788,28 +809,18 @@ export abstract class BLEAdvertiser {
         return true;
     }
 
-    /**
-     * Generate ephemeral ID
-     */
     private generateEphemeralId(): string {
         const bytes = new Uint8Array(16);
         crypto.getRandomValues(bytes);
         return this.bytesToHex(bytes);
     }
 
-    /**
-     * Get next sequence number
-     */
     private getNextSequenceNumber(): number {
         this.sequenceNumber = (this.sequenceNumber + 1) % 0xFFFFFFFF;
         return this.sequenceNumber;
     }
 
-    /**
-     * Hash data for caching
-     */
     private hashData(data: Uint8Array): string {
-        // Simple hash for caching
         let hash = 0;
         for (let i = 0; i < data.length; i++) {
             hash = ((hash << 5) - hash) + data[i];
@@ -818,18 +829,12 @@ export abstract class BLEAdvertiser {
         return hash.toString(36);
     }
 
-    /**
-     * Convert bytes to hex string
-     */
     private bytesToHex(bytes: Uint8Array): string {
         return Array.from(bytes)
             .map(b => b.toString(16).padStart(2, '0'))
             .join('');
     }
 
-    /**
-     * Convert hex string to bytes
-     */
     private hexToBytes(hex: string): Uint8Array {
         const bytes = new Uint8Array(hex.length / 2);
         for (let i = 0; i < hex.length; i += 2) {
@@ -838,18 +843,14 @@ export abstract class BLEAdvertiser {
         return bytes;
     }
 
-    // Platform-specific methods to be implemented
     protected async getNodeCount(): Promise<number> {
-        return 0; // Override in platform implementation
+        return 0;
     }
 
     protected async getQueueSize(): Promise<number> {
-        return 0; // Override in platform implementation
+        return 0;
     }
 
-    /**
-     * Get advertising status and statistics
-     */
     getStatus(): {
         isAdvertising: boolean;
         isPaused: boolean;
@@ -861,6 +862,7 @@ export abstract class BLEAdvertiser {
             failedAdvertisements: number;
             rotations: number;
             averageInterval: number;
+            protocolVersion: number;
             lastError: Error | null;
         };
     } {
@@ -873,9 +875,6 @@ export abstract class BLEAdvertiser {
         };
     }
 
-    /**
-     * Set advertising interval
-     */
     setAdvertisingInterval(interval: number): void {
         if (interval < 100 || interval > 10000) {
             throw new Error('Advertising interval must be between 100ms and 10s');
@@ -883,19 +882,13 @@ export abstract class BLEAdvertiser {
 
         this.advertisementInterval = interval;
 
-        // Restart periodic advertising with new interval
         if (this.isAdvertising && !this.isPaused) {
             this.startPeriodicAdvertising();
         }
     }
 
-    /**
-     * Set key pair for signing
-     */
     setKeyPair(keyPair: IGhostKeyPair): void {
         this.keyPair = keyPair;
-
-        // Clear signature cache as keys changed
         this.signatureCache.clear();
     }
 }

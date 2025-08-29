@@ -3,21 +3,12 @@ import { BleManager, State, Subscription } from 'react-native-ble-plx';
 import { Platform, PermissionsAndroid, AppState, AppStateStatus } from 'react-native';
 import {
     BLEManager,
-    BLEAdvertiser,
-    BLEScanner,
-    BLEConnectionManager,
     BLENode,
-    BLEAdvertisementData,
     BLE_CONFIG,
     NodeCapability,
     DeviceType,
     VerificationStatus,
-    ConnectionState,
-    BLEDiscoveryEvent,
-    BLEConnectionEvent,
-    BLEMessageEvent,
     IGhostKeyPair,
-    MessageType,
     MessagePriority,
     NetworkStats
 } from '../../core';
@@ -27,24 +18,23 @@ import { ReactNativeBLEScanner } from './ReactNativeBLEScanner';
 import { ReactNativeBLEConnectionManager } from './ReactNativeBLEConnectionManager';
 
 /**
- * React Native BLE Manager Implementation for v2.0
- * Fully aligned with core v2.0 security architecture
+ * React Native BLE Manager Implementation
+ * 
+ * This class extends the base BLEManager and provides React Native specific
+ * functionality like permission handling, app state management, and platform-specific
+ * BLE state monitoring. All Protocol v2 security is handled by the base class.
  */
 export class ReactNativeBLEManager extends BLEManager {
     private bleManager: BleManager;
-    private rnAdvertiser: ReactNativeBLEAdvertiser;
-    private rnScanner: ReactNativeBLEScanner;
-    private rnConnectionManager: ReactNativeBLEConnectionManager;
-
+    
     // React Native specific state
     private appStateSubscription?: any;
     private currentAppState: AppStateStatus = 'active';
     private bleStateSubscription?: Subscription;
     private currentBleState: State = State.Unknown;
-
+    
     // Additional RN event callbacks
     private rnEventCallbacks: Map<string, Set<Function>> = new Map();
-    getDiscoveredNodes: any;
 
     constructor(
         keyPair: IGhostKeyPair,
@@ -58,16 +48,13 @@ export class ReactNativeBLEManager extends BLEManager {
         const scanner = new ReactNativeBLEScanner(keyPair, bleMgr);
         const connectionManager = new ReactNativeBLEConnectionManager(keyPair, bleMgr);
 
-        // Call parent constructor with v2.0 components
-        super(keyPair, advertiser as BLEAdvertiser, scanner as unknown as BLEScanner, connectionManager as BLEConnectionManager);
+        // Call parent constructor
+        super(keyPair, advertiser, scanner, connectionManager);
 
-        // Store React Native specific references
+        // Store React Native specific reference
         this.bleManager = bleMgr;
-        this.rnAdvertiser = advertiser;
-        this.rnScanner = scanner;
-        this.rnConnectionManager = connectionManager;
 
-        console.log('📱 ReactNativeBLEManager v2.0 initialized');
+        console.log('ReactNativeBLEManager initialized with Protocol v2');
     }
 
     /**
@@ -75,7 +62,7 @@ export class ReactNativeBLEManager extends BLEManager {
      */
     async initialize(): Promise<void> {
         try {
-            console.log('🚀 Initializing ReactNativeBLEManager v2.0...');
+            console.log('Initializing ReactNativeBLEManager...');
 
             // Request permissions first
             await this.requestPermissions();
@@ -95,20 +82,20 @@ export class ReactNativeBLEManager extends BLEManager {
             // Set up BLE state monitoring
             this.setupBLEStateMonitoring();
 
-            // Start the v2.0 mesh network
+            // Start the mesh network (base class handles Protocol v2)
             await this.start();
 
-            console.log('✅ ReactNativeBLEManager v2.0 initialized successfully');
+            console.log('ReactNativeBLEManager initialized successfully');
 
             this.emitRNEvent('initialized', {
                 nodeId: this.keyPair.getFingerprint(),
                 platform: Platform.OS,
                 bleState: this.currentBleState,
-                version: 2
+                protocolVersion: 2
             });
 
         } catch (error) {
-            console.error('❌ Failed to initialize ReactNativeBLEManager:', error);
+            console.error('Failed to initialize ReactNativeBLEManager:', error);
             this.emitRNEvent('error', {
                 type: 'initialization',
                 error: error instanceof Error ? error.message : String(error)
@@ -118,47 +105,35 @@ export class ReactNativeBLEManager extends BLEManager {
     }
 
     /**
-     * Request necessary permissions for BLE on Android
+     * Request necessary permissions for BLE
      */
     private async requestPermissions(): Promise<void> {
         if (Platform.OS === 'android') {
             try {
-                console.log('📱 Requesting Android BLE permissions...');
+                console.log('Requesting Android BLE permissions...');
 
-                if (Platform.Version >= 31) {
+                const permissions = Platform.Version >= 31 ? [
                     // Android 12+
-                    const permissions = [
-                        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-                        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-                        PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
-                        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
-                    ];
-
-                    const results = await PermissionsAndroid.requestMultiple(permissions);
-
-                    for (const [permission, result] of Object.entries(results)) {
-                        if (result !== PermissionsAndroid.RESULTS.GRANTED) {
-                            throw new Error(`Permission ${permission} not granted`);
-                        }
-                    }
-                } else {
+                    PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+                    PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+                    PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
+                    PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
+                ] : [
                     // Android < 12
-                    const permissions = [
-                        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
-                    ];
+                    PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
+                ];
 
-                    const results = await PermissionsAndroid.requestMultiple(permissions);
+                const results = await PermissionsAndroid.requestMultiple(permissions);
 
-                    for (const [permission, result] of Object.entries(results)) {
-                        if (result !== PermissionsAndroid.RESULTS.GRANTED) {
-                            throw new Error(`Permission ${permission} not granted`);
-                        }
+                for (const [permission, result] of Object.entries(results)) {
+                    if (result !== PermissionsAndroid.RESULTS.GRANTED) {
+                        throw new Error(`Permission ${permission} not granted`);
                     }
                 }
 
-                console.log('✅ Android BLE permissions granted');
+                console.log('Android BLE permissions granted');
             } catch (error) {
-                console.error('❌ Failed to request Android permissions:', error);
+                console.error('Failed to request Android permissions:', error);
                 throw error;
             }
         }
@@ -173,7 +148,7 @@ export class ReactNativeBLEManager extends BLEManager {
             const state = await this.bleManager.state();
             return state !== State.Unsupported;
         } catch (error) {
-            console.error('❌ Error checking BLE support:', error);
+            console.error('Error checking BLE support:', error);
             return false;
         }
     }
@@ -192,8 +167,10 @@ export class ReactNativeBLEManager extends BLEManager {
                 }
             };
 
+            // Check initial state
             checkState();
 
+            // Subscribe to state changes
             const subscription = this.bleManager.onStateChange((state) => {
                 if (state === State.PoweredOn) {
                     subscription.remove();
@@ -204,6 +181,7 @@ export class ReactNativeBLEManager extends BLEManager {
                 }
             }, true);
 
+            // Timeout after 10 seconds
             setTimeout(() => {
                 subscription.remove();
                 reject(new Error('Timeout waiting for BLE to power on'));
@@ -216,7 +194,7 @@ export class ReactNativeBLEManager extends BLEManager {
      */
     private setupAppStateHandling(): void {
         this.appStateSubscription = AppState.addEventListener('change', (nextAppState) => {
-            console.log(`📱 App state changed: ${this.currentAppState} -> ${nextAppState}`);
+            console.log(`App state changed: ${this.currentAppState} -> ${nextAppState}`);
 
             if (this.currentAppState.match(/inactive|background/) && nextAppState === 'active') {
                 this.handleAppForeground();
@@ -233,7 +211,7 @@ export class ReactNativeBLEManager extends BLEManager {
      */
     private setupBLEStateMonitoring(): void {
         this.bleStateSubscription = this.bleManager.onStateChange((state) => {
-            console.log(`📱 BLE state changed: ${this.currentBleState} -> ${state}`);
+            console.log(`BLE state changed: ${this.currentBleState} -> ${state}`);
             const previousState = this.currentBleState;
             this.currentBleState = state;
 
@@ -254,22 +232,25 @@ export class ReactNativeBLEManager extends BLEManager {
      * Handle app coming to foreground
      */
     private async handleAppForeground(): Promise<void> {
-        console.log('📱 App came to foreground, resuming BLE operations...');
+        console.log('App came to foreground, resuming BLE operations...');
 
         if (this.currentBleState === State.PoweredOn) {
             try {
-                // Resume scanning
-                await this.rnScanner.resumeScanning();
+                // Resume scanning through base class
+                if (!this.getScanningStatus().isScanning) {
+                    await this.scanner.startScanning();
+                }
 
                 // Validate connections
-                await this.rnConnectionManager.validateConnections();
+                const connectionManager = this.connectionManager as ReactNativeBLEConnectionManager;
+                await connectionManager.validateConnections();
 
                 this.emitRNEvent('appForeground', {
                     resumed: true,
                     timestamp: Date.now()
                 });
             } catch (error) {
-                console.error('❌ Error resuming BLE operations:', error);
+                console.error('Error resuming BLE operations:', error);
             }
         }
     }
@@ -278,10 +259,13 @@ export class ReactNativeBLEManager extends BLEManager {
      * Handle app going to background
      */
     private handleAppBackground(): void {
-        console.log('📱 App went to background, optimizing BLE operations...');
+        console.log('App went to background');
+
+        // On iOS, we might want to pause scanning to save battery
+        // On Android, we can continue scanning in background if permitted
 
         this.emitRNEvent('appBackground', {
-            suspended: false,
+            suspended: Platform.OS === 'ios',
             timestamp: Date.now()
         });
     }
@@ -290,15 +274,19 @@ export class ReactNativeBLEManager extends BLEManager {
      * Handle BLE powered on
      */
     private async handleBLEPoweredOn(): Promise<void> {
-        console.log('📱 BLE powered on, resuming operations...');
+        console.log('BLE powered on, resuming operations...');
 
         try {
-            await this.rnScanner.resumeScanning();
+            // The base class will handle resuming operations
+            if (!this.getScanningStatus().isScanning) {
+                await this.scanner.startScanning();
+            }
+            
             this.emitRNEvent('bleResumed', {
                 timestamp: Date.now()
             });
         } catch (error) {
-            console.error('❌ Error handling BLE power on:', error);
+            console.error('Error handling BLE power on:', error);
         }
     }
 
@@ -306,14 +294,9 @@ export class ReactNativeBLEManager extends BLEManager {
      * Handle BLE powered off
      */
     private handleBLEPoweredOff(): void {
-        console.log('📱 BLE powered off, suspending operations...');
+        console.log('BLE powered off, suspending operations...');
 
-        try {
-            this.rnScanner.pauseScanning();
-        } catch (error) {
-            console.error('❌ Error pausing scanner:', error);
-        }
-
+        // The base class will handle stopping operations
         this.emitRNEvent('bleSuspended', {
             timestamp: Date.now(),
             reason: 'BLE powered off'
@@ -321,57 +304,49 @@ export class ReactNativeBLEManager extends BLEManager {
     }
 
     /**
-     * Get network statistics for React Native UI
+     * Get scanning status with React Native specific info
+     */
+    getScanningStatus(): any {
+        const baseStatus = this.scanner.getScanningStatus();
+        return {
+            ...baseStatus,
+            bleState: this.currentBleState,
+            appState: this.currentAppState
+        };
+    }
+
+    /**
+     * Get network statistics with React Native specific info
      */
     async getNetworkStats(): Promise<NetworkStats & {
         platform: string;
         bleState: string;
+        appState: string;
     }> {
         const stats = this.getNetworkStatus();
 
         return {
             ...stats,
             platform: Platform.OS,
-            bleState: this.currentBleState
+            bleState: this.currentBleState,
+            appState: this.currentAppState
         };
     }
 
     /**
-     * Connect to a specific node
+     * Connect to a specific node by ID
      */
     async connectToNode(nodeId: string): Promise<void> {
         try {
-            const nodes = this.getDiscoveredNodes();
-            const node = nodes.find((n: { id: string; }) => n.id === nodeId);
+            const nodes = this.scanner.getDiscoveredNodes();
+            const node = nodes.find(n => n.id === nodeId);
 
             if (!node) {
                 throw new Error(`Node ${nodeId} not found`);
             }
 
-            // Convert to v2.0 BLENode structure
-            const bleNode: BLENode = {
-                id: node.id,
-                name: node.name || node.id,
-                identityKey: node.identityKey || new Uint8Array(32),
-                encryptionKey: node.encryptionKey || new Uint8Array(32),
-                isConnected: false,
-                lastSeen: Date.now(),
-                firstSeen: node.firstSeen || Date.now(),
-                rssi: node.rssi || -100,
-                verificationStatus: VerificationStatus.UNVERIFIED,
-                trustScore: 0,
-                protocolVersion: 2,
-                capabilities: [NodeCapability.RELAY],
-                deviceType: DeviceType.PHONE,
-                supportedAlgorithms: [],
-                isRelay: true,
-                bluetoothAddress: node.id,
-                batteryLevel: undefined,
-                lastRSSI: 0,
-                canSee: undefined
-            };
-
-            await this.connectionManager.connectToNode(bleNode, node.id);
+            // The base connection manager handles Protocol v2
+            await this.connectionManager.connectToNode(node, node.bluetoothAddress || nodeId);
 
             this.emitRNEvent('nodeConnected', {
                 nodeId,
@@ -379,7 +354,7 @@ export class ReactNativeBLEManager extends BLEManager {
             });
 
         } catch (error) {
-            console.error(`❌ Failed to connect to node ${nodeId}:`, error);
+            console.error(`Failed to connect to node ${nodeId}:`, error);
             this.emitRNEvent('connectionError', {
                 nodeId,
                 error: error instanceof Error ? error.message : String(error)
@@ -401,9 +376,32 @@ export class ReactNativeBLEManager extends BLEManager {
             });
 
         } catch (error) {
-            console.error(`❌ Failed to disconnect from node ${nodeId}:`, error);
+            console.error(`Failed to disconnect from node ${nodeId}:`, error);
             throw error;
         }
+    }
+
+    /**
+     * Send a message (convenience method)
+     */
+    async sendSecureMessage(
+        recipientId: string,
+        content: string,
+        priority: MessagePriority = MessagePriority.NORMAL
+    ): Promise<string> {
+        // The base class handles all Protocol v2 security
+        return this.sendMessage(recipientId, content, priority);
+    }
+
+    /**
+     * Broadcast a message (convenience method)
+     */
+    async broadcastSecureMessage(
+        content: string,
+        priority: MessagePriority = MessagePriority.NORMAL
+    ): Promise<string> {
+        // The base class handles all Protocol v2 security
+        return this.broadcastMessage(content, priority);
     }
 
     /**
@@ -433,7 +431,7 @@ export class ReactNativeBLEManager extends BLEManager {
                 try {
                     callback(data);
                 } catch (error) {
-                    console.error(`❌ Error in RN event callback for ${event}:`, error);
+                    console.error(`Error in RN event callback for ${event}:`, error);
                 }
             });
         }
@@ -450,7 +448,8 @@ export class ReactNativeBLEManager extends BLEManager {
      * Check if manager is ready
      */
     isReady(): boolean {
-        return this.currentBleState === State.PoweredOn;
+        return this.currentBleState === State.PoweredOn && 
+               this.getScanningStatus().isScanning;
     }
 
     /**
@@ -464,11 +463,13 @@ export class ReactNativeBLEManager extends BLEManager {
      * Clean up resources
      */
     async cleanup(): Promise<void> {
-        console.log('🧹 Cleaning up ReactNativeBLEManager...');
+        console.log('Cleaning up ReactNativeBLEManager...');
 
         try {
+            // Stop the base manager
             await this.stop();
 
+            // Clean up React Native specific subscriptions
             if (this.appStateSubscription) {
                 this.appStateSubscription.remove();
             }
@@ -477,15 +478,16 @@ export class ReactNativeBLEManager extends BLEManager {
                 this.bleStateSubscription.remove();
             }
 
+            // Clear callbacks
             this.rnEventCallbacks.clear();
 
-            await this.rnAdvertiser.destroy();
+            // Destroy BLE manager
             await this.bleManager.destroy();
 
-            console.log('✅ ReactNativeBLEManager cleaned up');
+            console.log('ReactNativeBLEManager cleaned up');
 
         } catch (error) {
-            console.error('❌ Error during cleanup:', error);
+            console.error('Error during cleanup:', error);
         }
     }
 }

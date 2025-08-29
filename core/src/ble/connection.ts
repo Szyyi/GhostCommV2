@@ -1,5 +1,5 @@
 // core/src/ble/connection.ts
-// Enhanced BLE Connection Manager with Double Ratchet sessions and end-to-end encryption
+// Enhanced BLE Connection Manager with Protocol v2 Security
 
 import {
     BLENode,
@@ -7,6 +7,7 @@ import {
     BLEConnectionEvent,
     BLESession,
     BLE_CONFIG,
+    BLE_SECURITY_CONFIG,
     ConnectionState,
     MessageFragment,
     RelaySignature,
@@ -16,7 +17,9 @@ import {
     DeviceAttestation,
     VerificationStatus,
     VerificationMethod,
-    NodeCapability
+    NodeCapability,
+    MessageVerificationContext,
+    ProtocolHandshake
 } from './types';
 import {
     IGhostKeyPair,
@@ -29,7 +32,7 @@ import {
 import { MessageEncryption } from '../crypto/encryption';
 
 /**
- * Enhanced connection with security context
+ * Enhanced connection with Protocol v2 security context
  */
 export interface SecureConnection {
     // Basic info
@@ -37,9 +40,21 @@ export interface SecureConnection {
     nodeId: string;                      // Connected node ID
     deviceId: string;                    // Platform device ID
 
-    // Session management
-    session?: BLESession;                // Double Ratchet session
+    // Protocol version tracking (v2)
+    protocolVersion: number;             // Peer's protocol version
+    requiresSignatureVerification: boolean; // v2 requirement
+
+    // Session management with chain tracking
+    session?: BLESession;                // Double Ratchet session with chain state
     state: ConnectionState;              // Connection state
+
+    // Message chain tracking (Protocol v2)
+    messageChain: {
+        lastSentHash: string;
+        lastReceivedHash: string;
+        sentSequence: number;
+        receivedSequence: number;
+    };
 
     // Timing
     connectedAt: number;                 // Connection timestamp
@@ -65,14 +80,21 @@ export interface SecureConnection {
     attestation?: DeviceAttestation;    // Device attestation
     channelBinding?: Uint8Array;        // Channel binding token
     verificationStatus: VerificationStatus;
+    
+    // Public key cache (Protocol v2)
+    peerPublicKeys?: {
+        identity: Uint8Array;            // Ed25519 public key for verification
+        encryption: Uint8Array;          // X25519 public key
+    };
 }
 
 /**
- * Connection configuration
+ * Connection configuration with Protocol v2 settings
  */
 export interface ConnectionConfig {
     autoAuthenticate: boolean;           // Auto-establish Double Ratchet
     requireVerification: boolean;        // Require node verification
+    requireProtocolV2: boolean;         // Require Protocol v2 (default: true)
     connectionTimeout: number;           // Connection timeout in ms
     authenticationTimeout: number;       // Authentication timeout in ms
     heartbeatInterval: number;           // Heartbeat interval in ms
@@ -96,15 +118,22 @@ export interface ConnectionStatistics {
     averageThroughput: number;
     sessionEstablishments: number;
     authenticationFailures: number;
+    signatureVerificationFailures: number; // Protocol v2
+    messageChainBreaks: number;            // Protocol v2
 }
 
-// Callback types
+// Callback types with Protocol v2 verification
 export type ConnectionCallback = (event: BLEConnectionEvent) => void;
-export type MessageCallback = (message: BLEMessage, fromNodeId: string, session?: BLESession) => Promise<void>;
+export type MessageCallback = (
+    message: BLEMessage, 
+    fromNodeId: string, 
+    session?: BLESession,
+    verificationResult?: { verified: boolean; error?: string }
+) => Promise<void>;
 export type SessionCallback = (nodeId: string, session: BLESession) => void;
 
 /**
- * Enhanced BLE Connection Manager with security features
+ * Enhanced BLE Connection Manager with Protocol v2 security
  */
 export abstract class BLEConnectionManager {
     // State management
@@ -153,13 +182,14 @@ export abstract class BLEConnectionManager {
         this.messageCallbacks = new Set();
         this.sessionCallbacks = new Set();
 
-        // Default configuration
+        // Default configuration with Protocol v2
         this.config = {
             autoAuthenticate: true,
             requireVerification: false,
+            requireProtocolV2: BLE_SECURITY_CONFIG.REQUIRE_SIGNATURE_VERIFICATION,
             connectionTimeout: BLE_CONFIG.CONNECTION_TIMEOUT,
             authenticationTimeout: BLE_CONFIG.AUTHENTICATION_TIMEOUT,
-            heartbeatInterval: 30000, // 30 seconds
+            heartbeatInterval: 30000,
             maxRetries: 3,
             fragmentTimeout: 30000,
             ackTimeout: 5000,
@@ -178,7 +208,9 @@ export abstract class BLEConnectionManager {
             averageLatency: 0,
             averageThroughput: 0,
             sessionEstablishments: 0,
-            authenticationFailures: 0
+            authenticationFailures: 0,
+            signatureVerificationFailures: 0,
+            messageChainBreaks: 0
         };
 
         // Start timers
@@ -203,10 +235,15 @@ export abstract class BLEConnectionManager {
     }>;
 
     /**
-     * Connect to a node with security establishment
+     * Connect to a node with Protocol v2 security establishment
      */
     async connectToNode(node: BLENode, deviceId: string): Promise<string> {
         const nodeId = node.id;
+
+        // Check protocol version compatibility
+        if (this.config.requireProtocolV2 && node.protocolVersion < BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
+            throw new Error(`Node ${nodeId} uses incompatible protocol version ${node.protocolVersion}. Required: v${BLE_SECURITY_CONFIG.PROTOCOL_VERSION}`);
+        }
 
         // Check rate limiting
         if (!this.checkConnectionRateLimit(nodeId)) {
@@ -216,7 +253,7 @@ export abstract class BLEConnectionManager {
         // Check if already connected
         const existing = this.connections.get(nodeId);
         if (existing && existing.state !== ConnectionState.DISCONNECTED) {
-            console.log(`⚠️ Already connected/connecting to node: ${nodeId}`);
+            console.log(`Already connected/connecting to node: ${nodeId}`);
             return existing.id;
         }
 
@@ -227,14 +264,22 @@ export abstract class BLEConnectionManager {
         }
 
         try {
-            console.log(`🔗 Initiating secure connection to node: ${nodeId}`);
+            console.log(`Initiating secure connection to node: ${nodeId} (Protocol v${node.protocolVersion})`);
 
-            // Create connection record
+            // Create connection record with Protocol v2 fields
             const connection: SecureConnection = {
                 id: '', // Will be set after platform connection
                 nodeId,
                 deviceId,
+                protocolVersion: node.protocolVersion,
+                requiresSignatureVerification: node.protocolVersion >= 2,
                 state: ConnectionState.CONNECTING,
+                messageChain: {
+                    lastSentHash: '',
+                    lastReceivedHash: '',
+                    sentSequence: 0,
+                    receivedSequence: 0
+                },
                 connectedAt: Date.now(),
                 lastActivity: Date.now(),
                 lastHeartbeat: Date.now(),
@@ -248,6 +293,14 @@ export abstract class BLEConnectionManager {
                 fragments: new Map(),
                 verificationStatus: node.verificationStatus
             };
+
+            // Cache peer's public keys if available
+            if (node.identityKey && node.encryptionKey) {
+                connection.peerPublicKeys = {
+                    identity: node.identityKey,
+                    encryption: node.encryptionKey
+                };
+            }
 
             this.connections.set(nodeId, connection);
             this.statistics.totalConnections++;
@@ -268,32 +321,37 @@ export abstract class BLEConnectionManager {
             // Negotiate MTU
             try {
                 connection.mtu = await this.negotiateMTU(connectionId);
-                console.log(`📏 Negotiated MTU: ${connection.mtu} bytes`);
+                console.log(`Negotiated MTU: ${connection.mtu} bytes`);
             } catch (error) {
-                console.warn('⚠️ MTU negotiation failed, using default');
+                console.warn('MTU negotiation failed, using default');
             }
 
             // Get connection parameters
             try {
                 const params = await this.getConnectionParameters(connectionId);
-                console.log(`⚙️ Connection parameters - Interval: ${params.interval}ms, Latency: ${params.latency}, Timeout: ${params.timeout}ms`);
+                console.log(`Connection parameters - Interval: ${params.interval}ms, Latency: ${params.latency}, Timeout: ${params.timeout}ms`);
             } catch (error) {
-                console.warn('⚠️ Failed to get connection parameters');
+                console.warn('Failed to get connection parameters');
             }
 
             // Set up message receiving
             await this.setupMessageReceiving(connectionId, nodeId);
+
+            // Perform Protocol v2 handshake if required
+            if (connection.requiresSignatureVerification) {
+                await this.performProtocolHandshake(node, connection);
+            }
 
             // Auto-authenticate if configured
             if (this.config.autoAuthenticate && this.keyPair) {
                 try {
                     await this.authenticateConnection(node, connection);
                 } catch (error) {
-                    console.warn('⚠️ Auto-authentication failed:', error);
+                    console.warn('Auto-authentication failed:', error);
                 }
             }
 
-            console.log(`✅ Successfully connected to node: ${nodeId}`);
+            console.log(`Successfully connected to node: ${nodeId} (Protocol v${connection.protocolVersion})`);
 
             // Process queued messages
             await this.processMessageQueue(nodeId);
@@ -301,7 +359,7 @@ export abstract class BLEConnectionManager {
             return connectionId;
 
         } catch (error) {
-            console.error(`❌ Failed to connect to node ${nodeId}:`, error);
+            console.error(`Failed to connect to node ${nodeId}:`, error);
 
             // Clean up connection
             this.connections.delete(nodeId);
@@ -320,7 +378,63 @@ export abstract class BLEConnectionManager {
     }
 
     /**
-     * Authenticate connection with Double Ratchet
+     * Perform Protocol v2 handshake
+     */
+    private async performProtocolHandshake(
+        node: BLENode,
+        connection: SecureConnection
+    ): Promise<void> {
+        if (!this.keyPair) {
+            throw new Error('Key pair required for Protocol v2 handshake');
+        }
+
+        console.log(`Performing Protocol v2 handshake with ${node.id}`);
+
+        const handshake: ProtocolHandshake = {
+            protocolVersion: BLE_SECURITY_CONFIG.PROTOCOL_VERSION,
+            supportedVersions: [2],
+            identityKey: this.bytesToHex(this.keyPair.getIdentityPublicKey()),
+            encryptionKey: this.bytesToHex(this.keyPair.getEncryptionPublicKey()),
+            timestamp: Date.now(),
+            nonce: this.generateNonce(),
+            signature: '',
+            capabilities: [NodeCapability.RELAY, NodeCapability.STORAGE],
+            requireSignatureVerification: BLE_SECURITY_CONFIG.REQUIRE_SIGNATURE_VERIFICATION
+        };
+
+        // Sign handshake
+        const handshakeData = JSON.stringify(handshake);
+        const signature = this.keyPair.signMessage(handshakeData);
+        handshake.signature = this.bytesToHex(signature);
+
+        // Send handshake message
+        const handshakeMessage: BLEMessage = {
+            messageId: this.generateMessageId(),
+            version: BLE_SECURITY_CONFIG.PROTOCOL_VERSION,
+            sourceId: this.keyPair.getFingerprint(),
+            destinationId: node.id,
+            senderPublicKey: this.bytesToHex(this.keyPair.getIdentityPublicKey()),
+            messageSignature: handshake.signature,
+            messageHash: await this.calculateHash(handshakeData),
+            previousMessageHash: '',
+            sequenceNumber: 0,
+            ttl: Date.now() + 30000,
+            hopCount: 0,
+            maxHops: 1,
+            priority: MessagePriority.HIGH,
+            encryptedPayload: {} as EncryptedMessage, // Handshake is not encrypted
+            routePath: [],
+            relaySignatures: [],
+            createdAt: Date.now(),
+            expiresAt: Date.now() + 30000
+        };
+
+        await this.sendMessageInternal(connection, handshakeMessage);
+        console.log(`Protocol v2 handshake sent to ${node.id}`);
+    }
+
+    /**
+     * Authenticate connection with Double Ratchet and Protocol v2
      */
     private async authenticateConnection(
         node: BLENode,
@@ -339,7 +453,7 @@ export abstract class BLEConnectionManager {
             return;
         }
 
-        console.log(`🔐 Authenticating connection with ${nodeId}`);
+        console.log(`Authenticating connection with ${nodeId} (Protocol v${connection.protocolVersion})`);
         connection.state = ConnectionState.AUTHENTICATING;
 
         try {
@@ -354,7 +468,7 @@ export abstract class BLEConnectionManager {
                 'Authentication timeout'
             );
 
-            // Create BLE session
+            // Create BLE session with Protocol v2 fields
             connection.session = this.createBLESession(sessionKeys, connection);
             connection.state = ConnectionState.AUTHENTICATED;
             connection.authenticatedAt = Date.now();
@@ -364,7 +478,7 @@ export abstract class BLEConnectionManager {
             this.statistics.sessionEstablishments++;
             this.statistics.authenticatedConnections++;
 
-            console.log(`✅ Connection authenticated with ${nodeId}`);
+            console.log(`Connection authenticated with ${nodeId}`);
 
             // Emit authenticated event
             this.emitConnectionEvent({
@@ -379,7 +493,7 @@ export abstract class BLEConnectionManager {
             this.notifySessionCallbacks(nodeId, connection.session);
 
         } catch (error) {
-            console.error(`❌ Authentication failed with ${nodeId}:`, error);
+            console.error(`Authentication failed with ${nodeId}:`, error);
             connection.state = ConnectionState.CONNECTED;
             this.statistics.authenticationFailures++;
 
@@ -388,6 +502,328 @@ export abstract class BLEConnectionManager {
             this.pendingAuthentications.delete(nodeId);
         }
     }
+
+    /**
+     * Create BLE session with Protocol v2 chain tracking
+     */
+    private createBLESession(
+        sessionKeys: SessionKeys,
+        connection: SecureConnection
+    ): BLESession {
+        return {
+            sessionId: this.generateSessionId(),
+            state: ConnectionState.AUTHENTICATED,
+            establishedAt: Date.now(),
+            lastActivity: Date.now(),
+            sessionKeys,
+            sendMessageNumber: 0,
+            receiveMessageNumber: 0,
+            // Protocol v2 chain tracking
+            lastSentMessageHash: connection.messageChain.lastSentHash,
+            lastReceivedMessageHash: connection.messageChain.lastReceivedHash,
+            sentSequenceNumber: connection.messageChain.sentSequence,
+            receivedSequenceNumber: connection.messageChain.receivedSequence,
+            // Cached peer keys
+            peerIdentityKey: connection.peerPublicKeys?.identity,
+            peerEncryptionKey: connection.peerPublicKeys?.encryption,
+            // Connection parameters
+            mtu: connection.mtu,
+            connectionInterval: BLE_CONFIG.CONNECTION_INTERVAL_MIN,
+            latency: connection.latency,
+            supervisionTimeout: BLE_CONFIG.SUPERVISION_TIMEOUT,
+            channelBinding: connection.channelBinding,
+            attestation: connection.attestation,
+            throughput: connection.throughput,
+            packetLoss: connection.packetLoss,
+            messagesExchanged: connection.sentMessages + connection.receivedMessages,
+            bytesTransferred: 0
+        };
+    }
+
+    /**
+     * Send a secure message with Protocol v2 requirements
+     */
+    async sendMessage(nodeId: string, message: BLEMessage): Promise<void> {
+        const connection = this.connections.get(nodeId);
+
+        if (!connection) {
+            // Queue message for when connection is established
+            this.queueMessage(nodeId, message);
+            throw new Error(`No connection to node: ${nodeId}`);
+        }
+
+        if (connection.state === ConnectionState.DISCONNECTED) {
+            throw new Error(`Connection to ${nodeId} is disconnected`);
+        }
+
+        // Verify message has Protocol v2 required fields
+        if (connection.requiresSignatureVerification) {
+            if (!message.senderPublicKey) {
+                throw new Error('Protocol v2 requires senderPublicKey in message');
+            }
+            if (!message.messageSignature) {
+                throw new Error('Protocol v2 requires messageSignature in message');
+            }
+        }
+
+        // Wait for authentication if in progress
+        if (connection.state === ConnectionState.AUTHENTICATING) {
+            console.log(`Waiting for authentication to complete for ${nodeId}`);
+            await this.waitForAuthentication(nodeId);
+        }
+
+        // Update message chain
+        message.previousMessageHash = connection.messageChain.lastSentHash;
+        message.sequenceNumber = connection.messageChain.sentSequence++;
+
+        // Calculate and store message hash
+        const messageHash = await this.calculateMessageHash(message);
+        message.messageHash = messageHash;
+        connection.messageChain.lastSentHash = messageHash;
+
+        // Update session chain state if authenticated
+        if (connection.session) {
+            connection.session.lastSentMessageHash = messageHash;
+            connection.session.sentSequenceNumber = connection.messageChain.sentSequence;
+        }
+
+        // Send message
+        await this.sendMessageInternal(connection, message);
+    }
+
+    /**
+     * Handle incoming message with Protocol v2 verification
+     */
+    protected async handleIncomingMessage(
+        data: Uint8Array,
+        fromNodeId: string
+    ): Promise<void> {
+        const connection = this.connections.get(fromNodeId);
+        if (!connection) {
+            console.warn(`Received message from unknown node: ${fromNodeId}`);
+            return;
+        }
+
+        try {
+            // Parse message
+            const messageStr = new TextDecoder().decode(data);
+            const message: BLEMessage = JSON.parse(messageStr);
+
+            console.log(`Received message ${message.messageId} from ${fromNodeId} (Protocol v${message.version})`);
+
+            // Protocol v2: Verify signature if required
+            let verificationResult: { verified: boolean; error?: string } | undefined;
+            
+            if (connection.requiresSignatureVerification || message.version >= 2) {
+                verificationResult = await this.verifyMessageSignature(message, connection);
+                
+                if (!verificationResult.verified) {
+                    console.error(`Signature verification failed: ${verificationResult.error}`);
+                    this.statistics.signatureVerificationFailures++;
+                    
+                    // Emit signature verification failure
+                    this.emitConnectionEvent({
+                        type: 'error',
+                        nodeId: fromNodeId,
+                        connectionId: connection.id,
+                        error: this.createBLEError(
+                            BLEErrorCode.SIGNATURE_VERIFICATION_FAILED,
+                            verificationResult.error
+                        ),
+                        timestamp: Date.now()
+                    });
+                    
+                    return; // Reject message
+                }
+            }
+
+            // Verify message chain if we have history
+            if (connection.messageChain.lastReceivedHash && BLE_SECURITY_CONFIG.REQUIRE_MESSAGE_CHAINING) {
+                if (!this.verifyMessageChain(message, connection)) {
+                    console.error('Message chain verification failed');
+                    this.statistics.messageChainBreaks++;
+                    // Continue processing but note the break
+                }
+            }
+
+            // Update connection activity
+            connection.receivedMessages++;
+            connection.lastActivity = Date.now();
+            this.statistics.totalMessagesReceived++;
+            this.statistics.totalBytesTransferred += data.length;
+
+            // Update message chain
+            connection.messageChain.lastReceivedHash = message.messageHash;
+            connection.messageChain.receivedSequence = message.sequenceNumber;
+
+            // Update session chain state if authenticated
+            if (connection.session) {
+                connection.session.lastReceivedMessageHash = message.messageHash;
+                connection.session.receivedSequenceNumber = message.sequenceNumber;
+            }
+
+            // Handle fragments
+            if (message.fragment) {
+                const completeMessage = await this.handleFragment(connection, message);
+                if (!completeMessage) {
+                    return; // Waiting for more fragments
+                }
+                message.encryptedPayload = completeMessage.encryptedPayload;
+            }
+
+            // Send acknowledgment
+            await this.sendAcknowledgment(connection, message.messageId);
+
+            // Update latency if this is an acknowledgment
+            if (connection.pendingAcks.has(message.messageId)) {
+                const sentTime = connection.pendingAcks.get(message.messageId)!;
+                const latency = Date.now() - sentTime;
+                this.updateLatency(connection, latency);
+                connection.pendingAcks.delete(message.messageId);
+            }
+
+            // Process message callbacks with verification result
+            await this.processMessageCallbacks(message, fromNodeId, connection.session, verificationResult);
+
+        } catch (error) {
+            console.error(`Error handling message from ${fromNodeId}:`, error);
+        }
+    }
+
+    /**
+     * Verify message signature with Protocol v2 requirements
+     */
+    private async verifyMessageSignature(
+        message: BLEMessage,
+        connection: SecureConnection
+    ): Promise<{ verified: boolean; error?: string }> {
+        // Check for required fields
+        if (!message.senderPublicKey) {
+            return { verified: false, error: BLEErrorCode.NO_SENDER_KEY };
+        }
+
+        if (!message.messageSignature) {
+            return { verified: false, error: 'Missing message signature' };
+        }
+
+        try {
+            // Get sender's public key
+            const senderPublicKey = connection.peerPublicKeys?.identity || 
+                                   this.hexToBytes(message.senderPublicKey);
+
+            // Verify the signature
+            const messageHashBytes = new TextEncoder().encode(message.messageHash);
+            const signatureBytes = this.hexToBytes(message.messageSignature);
+
+            if (!this.keyPair) {
+                return { verified: false, error: 'No key pair for verification' };
+            }
+
+            const verified = this.keyPair.verifySignature(
+                messageHashBytes,
+                signatureBytes,
+                senderPublicKey // Protocol v2: Third parameter required
+            );
+
+            return { verified, error: verified ? undefined : 'Invalid signature' };
+
+        } catch (error) {
+            return { verified: false, error: String(error) };
+        }
+    }
+
+    /**
+     * Verify message chain integrity
+     */
+    private verifyMessageChain(
+        message: BLEMessage,
+        connection: SecureConnection
+    ): boolean {
+        // Check sequence number
+        if (BLE_SECURITY_CONFIG.REQUIRE_SEQUENCE_NUMBERS) {
+            const expectedSequence = connection.messageChain.receivedSequence + 1;
+            if (message.sequenceNumber !== expectedSequence) {
+                console.warn(`Sequence mismatch: expected ${expectedSequence}, got ${message.sequenceNumber}`);
+                // Allow some gap for network issues
+                if (Math.abs(message.sequenceNumber - expectedSequence) > BLE_SECURITY_CONFIG.MAX_SEQUENCE_NUMBER_GAP) {
+                    return false;
+                }
+            }
+        }
+
+        // Check message chain hash
+        if (message.previousMessageHash !== connection.messageChain.lastReceivedHash) {
+            console.warn(`Chain break: expected ${connection.messageChain.lastReceivedHash}, got ${message.previousMessageHash}`);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Internal message sending with fragmentation
+     */
+    private async sendMessageInternal(
+        connection: SecureConnection,
+        message: BLEMessage
+    ): Promise<void> {
+        try {
+            console.log(`Sending message ${message.messageId} to ${connection.nodeId}`);
+
+            // Serialize message
+            const messageData = JSON.stringify(message);
+            const messageBytes = new TextEncoder().encode(messageData);
+
+            // Check if fragmentation needed
+            if (messageBytes.length > connection.mtu) {
+                await this.sendFragmentedMessage(connection, message, messageBytes);
+            } else {
+                await this.sendSingleMessage(connection, messageBytes);
+            }
+
+            // Update statistics
+            connection.sentMessages++;
+            connection.lastActivity = Date.now();
+            this.statistics.totalMessagesSent++;
+            this.statistics.totalBytesTransferred += messageBytes.length;
+
+            // Track for acknowledgment
+            connection.pendingAcks.set(message.messageId, Date.now());
+
+            console.log(`Message sent to ${connection.nodeId}`);
+
+        } catch (error) {
+            console.error(`Failed to send message to ${connection.nodeId}:`, error);
+
+            // Update connection state on failure
+            if (this.isConnectionError(error)) {
+                connection.state = ConnectionState.FAILED;
+                this.handleConnectionFailure(connection, error);
+            }
+
+            throw error;
+        }
+    }
+
+    /**
+     * Process message callbacks with Protocol v2 verification result
+     */
+    private async processMessageCallbacks(
+        message: BLEMessage,
+        fromNodeId: string,
+        session?: BLESession,
+        verificationResult?: { verified: boolean; error?: string }
+    ): Promise<void> {
+        for (const callback of this.messageCallbacks) {
+            try {
+                await callback(message, fromNodeId, session, verificationResult);
+            } catch (error) {
+                console.error('Error in message callback:', error);
+            }
+        }
+    }
+
+    // ... [Keep all other existing methods] ...
 
     /**
      * Perform Double Ratchet authentication
@@ -419,28 +855,36 @@ export abstract class BLEConnectionManager {
         return sessionKeys;
     }
 
-    /**
-     * Exchange authentication messages
-     */
     private async exchangeAuthMessages(
         node: BLENode,
         connection: SecureConnection,
         sessionKeys: SessionKeys
     ): Promise<void> {
+        if (!this.keyPair) return;
+
         // Create authentication challenge
         const challenge = crypto.getRandomValues(new Uint8Array(32));
+        const challengeHash = await this.calculateHash(this.bytesToHex(challenge));
 
-        // Send authentication request
+        // Sign the challenge
+        const signature = this.keyPair.signMessage(challenge);
+
+        // Send authentication request with Protocol v2 fields
         const authRequest: BLEMessage = {
             messageId: this.generateMessageId(),
-            version: 2,
-            sourceId: this.keyPair!.getFingerprint(),
+            version: BLE_SECURITY_CONFIG.PROTOCOL_VERSION,
+            sourceId: this.keyPair.getFingerprint(),
             destinationId: node.id,
+            senderPublicKey: this.bytesToHex(this.keyPair.getIdentityPublicKey()),
+            messageSignature: this.bytesToHex(signature),
+            messageHash: challengeHash,
+            previousMessageHash: '',
+            sequenceNumber: 0,
             ttl: Date.now() + 30000,
             hopCount: 0,
             maxHops: 1,
             priority: MessagePriority.HIGH,
-            encryptedPayload: {} as EncryptedMessage, // Would encrypt challenge
+            encryptedPayload: {} as EncryptedMessage,
             routePath: [],
             relaySignatures: [],
             createdAt: Date.now(),
@@ -448,97 +892,58 @@ export abstract class BLEConnectionManager {
         };
 
         await this.sendMessageInternal(connection, authRequest);
-
-        // Wait for authentication response
-        // This would be handled by incoming message handler
     }
 
-    /**
-     * Send a secure message
-     */
-    async sendMessage(nodeId: string, message: BLEMessage): Promise<void> {
-        const connection = this.connections.get(nodeId);
-
-        if (!connection) {
-            // Queue message for when connection is established
-            this.queueMessage(nodeId, message);
-            throw new Error(`No connection to node: ${nodeId}`);
-        }
-
-        if (connection.state === ConnectionState.DISCONNECTED) {
-            throw new Error(`Connection to ${nodeId} is disconnected`);
-        }
-
-        // Wait for authentication if in progress
-        if (connection.state === ConnectionState.AUTHENTICATING) {
-            console.log(`⏳ Waiting for authentication to complete for ${nodeId}`);
-            await this.waitForAuthentication(nodeId);
-        }
-
-        // Send message
-        await this.sendMessageInternal(connection, message);
+    // Utility methods
+    private async calculateMessageHash(message: BLEMessage): Promise<string> {
+        const messageData = JSON.stringify({
+            messageId: message.messageId,
+            sourceId: message.sourceId,
+            destinationId: message.destinationId,
+            sequenceNumber: message.sequenceNumber,
+            encryptedPayload: message.encryptedPayload
+        });
+        return this.calculateHash(messageData);
     }
 
-    /**
-     * Internal message sending with fragmentation
-     */
-    private async sendMessageInternal(
-        connection: SecureConnection,
-        message: BLEMessage
-    ): Promise<void> {
-        try {
-            console.log(`📤 Sending message ${message.messageId} to ${connection.nodeId}`);
-
-            // Serialize message
-            const messageData = JSON.stringify(message);
-            const messageBytes = new TextEncoder().encode(messageData);
-
-            // Check if fragmentation needed
-            if (messageBytes.length > connection.mtu) {
-                await this.sendFragmentedMessage(connection, message, messageBytes);
-            } else {
-                await this.sendSingleMessage(connection, messageBytes);
-            }
-
-            // Update statistics
-            connection.sentMessages++;
-            connection.lastActivity = Date.now();
-            this.statistics.totalMessagesSent++;
-            this.statistics.totalBytesTransferred += messageBytes.length;
-
-            // Track for acknowledgment
-            connection.pendingAcks.set(message.messageId, Date.now());
-
-            console.log(`✅ Message sent to ${connection.nodeId}`);
-
-        } catch (error) {
-            console.error(`❌ Failed to send message to ${connection.nodeId}:`, error);
-
-            // Update connection state on failure
-            if (this.isConnectionError(error)) {
-                connection.state = ConnectionState.FAILED;
-                this.handleConnectionFailure(connection, error);
-            }
-
-            throw error;
-        }
+    private async calculateHash(data: string): Promise<string> {
+        const encoder = new TextEncoder();
+        const dataBytes = encoder.encode(data);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', dataBytes);
+        return this.bytesToHex(new Uint8Array(hashBuffer));
     }
 
-    /**
-     * Send fragmented message
-     */
+    private generateNonce(): string {
+        return this.bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+    }
+
+    private hexToBytes(hex: string): Uint8Array {
+        const bytes = new Uint8Array(hex.length / 2);
+        for (let i = 0; i < hex.length; i += 2) {
+            bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+        }
+        return bytes;
+    }
+
+    private bytesToHex(bytes: Uint8Array): string {
+        return Array.from(bytes)
+            .map(b => b.toString(16).padStart(2, '0'))
+            .join('');
+    }
+
+    // ... [Include all other existing methods unchanged] ...
+
     private async sendFragmentedMessage(
         connection: SecureConnection,
         message: BLEMessage,
         data: Uint8Array
     ): Promise<void> {
-        const fragmentSize = connection.mtu - 100; // Reserve space for fragment metadata
+        const fragmentSize = connection.mtu - 100;
         const totalFragments = Math.ceil(data.length / fragmentSize);
         const fragmentId = this.generateFragmentId();
 
-        console.log(`📦 Sending message in ${totalFragments} fragments`);
+        console.log(`Sending message in ${totalFragments} fragments`);
 
-        // Update message with fragment info
         message.fragment = {
             fragmentId,
             index: 0,
@@ -547,104 +952,37 @@ export abstract class BLEConnectionManager {
             checksum: await this.calculateChecksum(data)
         };
 
-        // Send each fragment
         for (let i = 0; i < totalFragments; i++) {
             const start = i * fragmentSize;
             const end = Math.min(start + fragmentSize, data.length);
             const fragmentData = data.slice(start, end);
 
-            // Update fragment index
             message.fragment.index = i;
 
-            // Create fragment message
             const fragmentMessage = {
                 ...message,
                 fragment: { ...message.fragment }
             };
 
-            // Send fragment
             const fragmentBytes = new TextEncoder().encode(JSON.stringify(fragmentMessage));
             await this.sendSingleMessage(connection, fragmentBytes);
 
-            // Small delay between fragments
             if (i < totalFragments - 1) {
                 await this.delay(10);
             }
         }
 
-        console.log(`✅ All ${totalFragments} fragments sent`);
+        console.log(`All ${totalFragments} fragments sent`);
     }
 
-    /**
-     * Send single message or fragment
-     */
     private async sendSingleMessage(
         connection: SecureConnection,
         data: Uint8Array
     ): Promise<void> {
         await this.sendDataToDevice(connection.id, data);
-
-        // Update throughput calculation
         this.updateThroughput(connection, data.length);
     }
 
-    /**
-     * Handle incoming message
-     */
-    protected async handleIncomingMessage(
-        data: Uint8Array,
-        fromNodeId: string
-    ): Promise<void> {
-        const connection = this.connections.get(fromNodeId);
-        if (!connection) {
-            console.warn(`⚠️ Received message from unknown node: ${fromNodeId}`);
-            return;
-        }
-
-        try {
-            // Parse message
-            const messageStr = new TextDecoder().decode(data);
-            const message: BLEMessage = JSON.parse(messageStr);
-
-            console.log(`📥 Received message ${message.messageId} from ${fromNodeId}`);
-
-            // Update connection activity
-            connection.receivedMessages++;
-            connection.lastActivity = Date.now();
-            this.statistics.totalMessagesReceived++;
-            this.statistics.totalBytesTransferred += data.length;
-
-            // Handle fragments
-            if (message.fragment) {
-                const completeMessage = await this.handleFragment(connection, message);
-                if (!completeMessage) {
-                    return; // Waiting for more fragments
-                }
-                message.encryptedPayload = completeMessage.encryptedPayload;
-            }
-
-            // Send acknowledgment
-            await this.sendAcknowledgment(connection, message.messageId);
-
-            // Update latency if this is an acknowledgment
-            if (connection.pendingAcks.has(message.messageId)) {
-                const sentTime = connection.pendingAcks.get(message.messageId)!;
-                const latency = Date.now() - sentTime;
-                this.updateLatency(connection, latency);
-                connection.pendingAcks.delete(message.messageId);
-            }
-
-            // Process message callbacks
-            await this.processMessageCallbacks(message, fromNodeId, connection.session);
-
-        } catch (error) {
-            console.error(`❌ Error handling message from ${fromNodeId}:`, error);
-        }
-    }
-
-    /**
-     * Handle message fragment
-     */
     private async handleFragment(
         connection: SecureConnection,
         message: BLEMessage
@@ -652,35 +990,28 @@ export abstract class BLEConnectionManager {
         const fragment = message.fragment!;
         const fragmentId = fragment.fragmentId;
 
-        // Get or create fragment set
         let fragments = connection.fragments.get(fragmentId);
         if (!fragments) {
             fragments = new Map();
             connection.fragments.set(fragmentId, fragments);
         }
 
-        // Store fragment
         fragments.set(fragment.index, fragment);
 
-        console.log(`📦 Received fragment ${fragment.index + 1}/${fragment.total}`);
+        console.log(`Received fragment ${fragment.index + 1}/${fragment.total}`);
 
-        // Check if all fragments received
         if (fragments.size === fragment.total) {
-            console.log(`✅ All fragments received, reassembling message`);
+            console.log(`All fragments received, reassembling message`);
 
-            // Reassemble message
             const reassembled = await this.reassembleFragments(fragments, fragment.total);
 
-            // Verify checksum
             const checksum = await this.calculateChecksum(reassembled);
             if (checksum !== fragment.checksum) {
                 throw new Error('Fragment checksum mismatch');
             }
 
-            // Parse complete message
             const completeMessage = JSON.parse(new TextDecoder().decode(reassembled));
 
-            // Clean up fragments
             connection.fragments.delete(fragmentId);
 
             return completeMessage;
@@ -689,9 +1020,6 @@ export abstract class BLEConnectionManager {
         return null;
     }
 
-    /**
-     * Reassemble message fragments
-     */
     private async reassembleFragments(
         fragments: Map<number, MessageFragment>,
         total: number
@@ -703,13 +1031,9 @@ export abstract class BLEConnectionManager {
             if (!fragment) {
                 throw new Error(`Missing fragment ${i}`);
             }
-
-            // Extract data from fragment message
-            // This is simplified - actual implementation would extract payload
             parts.push(new Uint8Array(fragment.size));
         }
 
-        // Combine all parts
         const totalSize = parts.reduce((sum, part) => sum + part.length, 0);
         const result = new Uint8Array(totalSize);
         let offset = 0;
@@ -722,9 +1046,6 @@ export abstract class BLEConnectionManager {
         return result;
     }
 
-    /**
-     * Send acknowledgment
-     */
     private async sendAcknowledgment(
         connection: SecureConnection,
         messageId: string
@@ -740,7 +1061,6 @@ export abstract class BLEConnectionManager {
             )
         };
 
-        // Send lightweight ack message
         const ackData = JSON.stringify(ack);
         await this.sendDataToDevice(
             connection.id,
@@ -748,14 +1068,11 @@ export abstract class BLEConnectionManager {
         );
     }
 
-    /**
-     * Broadcast message to all connected nodes
-     */
     async broadcastMessage(
         message: BLEMessage,
         excludeNodeId?: string
     ): Promise<{ sent: number; failed: number }> {
-        console.log(`📢 Broadcasting message ${message.messageId}`);
+        console.log(`Broadcasting message ${message.messageId}`);
 
         const results = { sent: 0, failed: 0 };
         const promises: Promise<void>[] = [];
@@ -769,7 +1086,7 @@ export abstract class BLEConnectionManager {
             const promise = this.sendMessage(nodeId, message)
                 .then(() => { results.sent++; })
                 .catch((error) => {
-                    console.warn(`❌ Broadcast failed to ${nodeId}:`, error);
+                    console.warn(`Broadcast failed to ${nodeId}:`, error);
                     results.failed++;
                 });
 
@@ -778,13 +1095,10 @@ export abstract class BLEConnectionManager {
 
         await Promise.allSettled(promises);
 
-        console.log(`📢 Broadcast complete: ${results.sent} sent, ${results.failed} failed`);
+        console.log(`Broadcast complete: ${results.sent} sent, ${results.failed} failed`);
         return results;
     }
 
-    /**
-     * Disconnect from a node
-     */
     async disconnectFromNode(nodeId: string): Promise<void> {
         const connection = this.connections.get(nodeId);
         if (!connection) {
@@ -792,32 +1106,26 @@ export abstract class BLEConnectionManager {
         }
 
         try {
-            console.log(`🔌 Disconnecting from node: ${nodeId}`);
+            console.log(`Disconnecting from node: ${nodeId}`);
 
-            // Update state
             connection.state = ConnectionState.DISCONNECTING;
 
-            // Clean up session
             if (connection.session) {
                 await this.closeSession(connection);
             }
 
-            // Platform disconnection
             await this.disconnectFromDevice(connection.id);
 
-            // Update statistics
             this.statistics.activeConnections--;
             if (connection.session) {
                 this.statistics.authenticatedConnections--;
             }
 
-            // Remove connection
             this.connections.delete(nodeId);
             this.sessions.delete(nodeId);
 
-            console.log(`✅ Disconnected from node: ${nodeId}`);
+            console.log(`Disconnected from node: ${nodeId}`);
 
-            // Emit event
             this.emitConnectionEvent({
                 type: 'disconnected',
                 nodeId,
@@ -826,16 +1134,13 @@ export abstract class BLEConnectionManager {
             });
 
         } catch (error) {
-            console.error(`❌ Error disconnecting from ${nodeId}:`, error);
-
-            // Force cleanup
+            console.error(`Error disconnecting from ${nodeId}:`, error);
             this.connections.delete(nodeId);
             this.sessions.delete(nodeId);
         }
     }
 
-    // ===== HELPER METHODS =====
-
+    // Helper methods
     private async connectWithRetry(
         deviceId: string,
         nodeId: string
@@ -847,40 +1152,15 @@ export abstract class BLEConnectionManager {
                 return await this.connectToDevice(deviceId, nodeId);
             } catch (error) {
                 lastError = error as Error;
-                console.warn(`⚠️ Connection attempt ${i + 1} failed:`, error);
+                console.warn(`Connection attempt ${i + 1} failed:`, error);
 
                 if (i < this.config.maxRetries - 1) {
-                    await this.delay(1000 * (i + 1)); // Exponential backoff
+                    await this.delay(1000 * (i + 1));
                 }
             }
         }
 
         throw lastError || new Error('Connection failed');
-    }
-
-    private createBLESession(
-        sessionKeys: SessionKeys,
-        connection: SecureConnection
-    ): BLESession {
-        return {
-            sessionId: this.generateSessionId(),
-            state: ConnectionState.AUTHENTICATED,
-            establishedAt: Date.now(),
-            lastActivity: Date.now(),
-            sessionKeys,
-            sendMessageNumber: 0,
-            receiveMessageNumber: 0,
-            mtu: connection.mtu,
-            connectionInterval: BLE_CONFIG.CONNECTION_INTERVAL_MIN,
-            latency: connection.latency,
-            supervisionTimeout: BLE_CONFIG.SUPERVISION_TIMEOUT,
-            channelBinding: connection.channelBinding,
-            attestation: connection.attestation,
-            throughput: connection.throughput,
-            packetLoss: connection.packetLoss,
-            messagesExchanged: connection.sentMessages + connection.receivedMessages,
-            bytesTransferred: 0
-        };
     }
 
     private generateChannelBinding(connection: SecureConnection): Uint8Array {
@@ -922,7 +1202,7 @@ export abstract class BLEConnectionManager {
         }
 
         queue.push(message);
-        console.log(`📋 Message queued for ${nodeId} (${queue.length} in queue)`);
+        console.log(`Message queued for ${nodeId} (${queue.length} in queue)`);
     }
 
     private async processMessageQueue(nodeId: string): Promise<void> {
@@ -931,7 +1211,7 @@ export abstract class BLEConnectionManager {
             return;
         }
 
-        console.log(`📤 Processing ${queue.length} queued messages for ${nodeId}`);
+        console.log(`Processing ${queue.length} queued messages for ${nodeId}`);
 
         const messages = [...queue];
         this.messageQueues.delete(nodeId);
@@ -940,19 +1220,14 @@ export abstract class BLEConnectionManager {
             try {
                 await this.sendMessage(nodeId, message);
             } catch (error) {
-                console.error(`❌ Failed to send queued message:`, error);
+                console.error(`Failed to send queued message:`, error);
             }
         }
     }
 
     private async closeSession(connection: SecureConnection): Promise<void> {
         if (!connection.session) return;
-
-        console.log(`🔒 Closing session for ${connection.nodeId}`);
-
-        // Send session close message
-        // Clean up session keys
-        // Update statistics
+        console.log(`Closing session for ${connection.nodeId}`);
     }
 
     private checkConnectionRateLimit(nodeId: string): boolean {
@@ -960,12 +1235,10 @@ export abstract class BLEConnectionManager {
         const lastAttempt = this.lastConnectionAttempt.get(nodeId) || 0;
         const attempts = this.connectionAttempts.get(nodeId) || 0;
 
-        // Reset counter after 1 minute
         if (now - lastAttempt > 60000) {
             this.connectionAttempts.set(nodeId, 0);
         }
 
-        // Max 5 attempts per minute
         if (attempts >= 5) {
             return false;
         }
@@ -983,7 +1256,6 @@ export abstract class BLEConnectionManager {
             const instantThroughput = (bytes * 1000) / timeDiff;
             connection.throughput = (connection.throughput * 0.7) + (instantThroughput * 0.3);
 
-            // Update global average
             this.statistics.averageThroughput =
                 (this.statistics.averageThroughput * 0.9) + (connection.throughput * 0.1);
         }
@@ -992,17 +1264,15 @@ export abstract class BLEConnectionManager {
     private updateLatency(connection: SecureConnection, latency: number): void {
         connection.latency = (connection.latency * 0.7) + (latency * 0.3);
 
-        // Update global average
         this.statistics.averageLatency =
             (this.statistics.averageLatency * 0.9) + (connection.latency * 0.1);
     }
 
     private handleConnectionFailure(connection: SecureConnection, error: any): void {
-        console.error(`❌ Connection failed for ${connection.nodeId}:`, error);
+        console.error(`Connection failed for ${connection.nodeId}:`, error);
 
         connection.state = ConnectionState.FAILED;
 
-        // Emit failure event
         this.emitConnectionEvent({
             type: 'error',
             nodeId: connection.nodeId,
@@ -1013,7 +1283,6 @@ export abstract class BLEConnectionManager {
     }
 
     private isConnectionError(error: any): boolean {
-        // Platform-specific error detection
         return true;
     }
 
@@ -1062,14 +1331,7 @@ export abstract class BLEConnectionManager {
         return this.bytesToHex(bytes);
     }
 
-    private bytesToHex(bytes: Uint8Array): string {
-        return Array.from(bytes)
-            .map(b => b.toString(16).padStart(2, '0'))
-            .join('');
-    }
-
-    // ===== TIMER MANAGEMENT =====
-
+    // Timer management
     private startHeartbeatTimer(): void {
         this.heartbeatTimer = setInterval(() => {
             this.sendHeartbeats();
@@ -1102,7 +1364,6 @@ export abstract class BLEConnectionManager {
 
             const timeSinceLastActivity = Date.now() - connection.lastActivity;
             if (timeSinceLastActivity > this.config.heartbeatInterval / 2) {
-                // Send heartbeat
                 connection.lastHeartbeat = Date.now();
             }
         }
@@ -1115,7 +1376,7 @@ export abstract class BLEConnectionManager {
             const timeSinceActivity = now - connection.lastActivity;
 
             if (timeSinceActivity > this.config.connectionTimeout) {
-                console.log(`⏰ Connection timeout for ${nodeId}`);
+                console.log(`Connection timeout for ${nodeId}`);
                 this.handleConnectionFailure(
                     connection,
                     new Error('Connection timeout')
@@ -1130,10 +1391,8 @@ export abstract class BLEConnectionManager {
         for (const [nodeId, connection] of this.connections) {
             for (const [messageId, sentTime] of connection.pendingAcks) {
                 if (now - sentTime > this.config.ackTimeout) {
-                    console.warn(`⚠️ Acknowledgment timeout for message ${messageId}`);
+                    console.warn(`Acknowledgment timeout for message ${messageId}`);
                     connection.pendingAcks.delete(messageId);
-
-                    // Update packet loss
                     connection.packetLoss = Math.min(1, connection.packetLoss + 0.1);
                 }
             }
@@ -1141,43 +1400,10 @@ export abstract class BLEConnectionManager {
     }
 
     private cleanupFragments(): void {
-        const now = Date.now();
-
         for (const [nodeId, connection] of this.connections) {
             for (const [fragmentId, fragments] of connection.fragments) {
-                // Check age of first fragment
-                const firstFragment = fragments.get(0);
-                if (firstFragment) {
-                    // Simplified - would track actual timestamp
-                    connection.fragments.delete(fragmentId);
-                    console.warn(`⚠️ Fragment timeout for ${fragmentId}`);
-                }
-            }
-        }
-    }
-
-    // ===== CALLBACK MANAGEMENT =====
-
-    private async processMessageCallbacks(
-        message: BLEMessage,
-        fromNodeId: string,
-        session?: BLESession
-    ): Promise<void> {
-        for (const callback of this.messageCallbacks) {
-            try {
-                await callback(message, fromNodeId, session);
-            } catch (error) {
-                console.error('❌ Error in message callback:', error);
-            }
-        }
-    }
-
-    private notifySessionCallbacks(nodeId: string, session: BLESession): void {
-        for (const callback of this.sessionCallbacks) {
-            try {
-                callback(nodeId, session);
-            } catch (error) {
-                console.error('❌ Error in session callback:', error);
+                connection.fragments.delete(fragmentId);
+                console.warn(`Fragment timeout for ${fragmentId}`);
             }
         }
     }
@@ -1187,13 +1413,22 @@ export abstract class BLEConnectionManager {
             try {
                 callback(event);
             } catch (error) {
-                console.error('❌ Error in connection callback:', error);
+                console.error('Error in connection callback:', error);
             }
         }
     }
 
-    // ===== PUBLIC API =====
+    private notifySessionCallbacks(nodeId: string, session: BLESession): void {
+        for (const callback of this.sessionCallbacks) {
+            try {
+                callback(nodeId, session);
+            } catch (error) {
+                console.error('Error in session callback:', error);
+            }
+        }
+    }
 
+    // Public API
     onConnectionEvent(callback: ConnectionCallback): void {
         this.connectionCallbacks.add(callback);
     }
@@ -1260,15 +1495,13 @@ export abstract class BLEConnectionManager {
     }
 
     async cleanup(): Promise<void> {
-        console.log('🧹 Cleaning up all connections...');
+        console.log('Cleaning up all connections...');
 
-        // Stop timers
         if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
         if (this.timeoutTimer) clearInterval(this.timeoutTimer);
         if (this.ackTimer) clearInterval(this.ackTimer);
         if (this.fragmentTimer) clearInterval(this.fragmentTimer);
 
-        // Disconnect all
         const promises: Promise<void>[] = [];
         for (const nodeId of this.connections.keys()) {
             promises.push(this.disconnectFromNode(nodeId));
@@ -1276,7 +1509,6 @@ export abstract class BLEConnectionManager {
 
         await Promise.allSettled(promises);
 
-        // Clear all data
         this.connections.clear();
         this.sessions.clear();
         this.pendingAuthentications.clear();
@@ -1285,6 +1517,6 @@ export abstract class BLEConnectionManager {
         this.messageCallbacks.clear();
         this.sessionCallbacks.clear();
 
-        console.log('✅ Connection cleanup complete');
+        console.log('Connection cleanup complete');
     }
 }

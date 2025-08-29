@@ -100,12 +100,15 @@ export class GhostKeyPair implements IGhostKeyPair {
     }
 
     /**
-     * Export keys with optional password (currently returns unencrypted)
-     * This method is called by OnboardingScreen
+     * Export keys with optional password encryption
+     * Properly typed as per IGhostKeyPair interface
      */
     export(password?: string): ExportedKeys {
-        // For now, just return the unencrypted keys
-        // The password parameter is kept for future encrypted export implementation
+        if (password) {
+            // Future implementation: encrypt the exported keys with password
+            // For now, log warning and return unencrypted
+            console.warn('Password encryption not yet implemented, exporting unencrypted keys');
+        }
         return this.exportKeys();
     }
 
@@ -118,8 +121,11 @@ export class GhostKeyPair implements IGhostKeyPair {
             ? JSON.parse(exportedData)
             : exportedData;
 
-        // If password is provided in the future, decrypt here
-        // For now, just import the keys directly
+        if (password) {
+            // Future implementation: decrypt the keys with password
+            console.warn('Password decryption not yet implemented');
+        }
+
         return GhostKeyPair.import(data);
     }
 
@@ -242,7 +248,7 @@ export class GhostKeyPair implements IGhostKeyPair {
      */
     rotateEncryptionKey(): KeyPair {
         // Store old key for decryption of past messages
-        const oldKey = this.encryptionKeyPair;
+        const oldKey = { ...this.encryptionKeyPair };
 
         // Generate new encryption key
         this.encryptionKeyPair = this.generateEncryptionKeyPair();
@@ -259,6 +265,12 @@ export class GhostKeyPair implements IGhostKeyPair {
      */
     initializeSession(theirPublicKey: Uint8Array): SessionKeys {
         const sessionId = this.getSessionId(theirPublicKey);
+
+        // Check if session already exists
+        const existingSession = this.activeSessions.get(sessionId);
+        if (existingSession) {
+            return existingSession;
+        }
 
         // Perform initial ECDH
         const sharedSecret = this.performKeyExchange(theirPublicKey);
@@ -294,11 +306,17 @@ export class GhostKeyPair implements IGhostKeyPair {
             const info = new TextEncoder().encode(CONSTANTS.CHAIN_KEY_SEED);
             const newChainKey = hkdf(sha256, session.chainKey, undefined, info, 32);
 
-            return {
+            const updatedSession: SessionKeys = {
                 ...session,
                 chainKey: newChainKey,
                 messageNumber: session.messageNumber + 1
             };
+
+            // Update stored session
+            const sessionId = this.bytesToHex(sha256(session.rootKey));
+            this.activeSessions.set(sessionId, updatedSession);
+
+            return updatedSession;
         }
 
         // Asymmetric ratchet (new chain)
@@ -315,7 +333,7 @@ export class GhostKeyPair implements IGhostKeyPair {
         const newRootKey = keyMaterial.slice(0, 32);
         const newChainKey = keyMaterial.slice(32, 64);
 
-        return {
+        const updatedSession: SessionKeys = {
             rootKey: newRootKey,
             chainKey: newChainKey,
             sendingKey: undefined,
@@ -323,6 +341,18 @@ export class GhostKeyPair implements IGhostKeyPair {
             messageNumber: 0,
             previousChainLength: session.messageNumber
         };
+
+        // Update stored session with new ID (root key changed)
+        const newSessionId = this.bytesToHex(sha256(newRootKey));
+        this.activeSessions.set(newSessionId, updatedSession);
+
+        // Remove old session if different
+        const oldSessionId = this.bytesToHex(sha256(session.rootKey));
+        if (oldSessionId !== newSessionId) {
+            this.activeSessions.delete(oldSessionId);
+        }
+
+        return updatedSession;
     }
 
     /**
@@ -394,6 +424,9 @@ export class GhostKeyPair implements IGhostKeyPair {
 
         // Generate deterministic pre-keys from seed
         keyPair.generateDeterministicPreKeys(preKeySeed, 10);
+
+        // Clear sensitive material
+        keyMaterial.fill(0);
 
         return keyPair;
     }
@@ -571,6 +604,11 @@ export class GhostKeyPair implements IGhostKeyPair {
      * Perform ECDH key exchange with proper key derivation
      */
     performKeyExchange(peerPublicKey: Uint8Array, salt?: Uint8Array): Uint8Array {
+        // Validate peer public key
+        if (peerPublicKey.length !== 32) {
+            throw new Error('Invalid peer public key length');
+        }
+
         // Perform raw ECDH
         const sharedSecret = x25519.getSharedSecret(this.encryptionKeyPair.privateKey, peerPublicKey);
 
@@ -594,14 +632,8 @@ export class GhostKeyPair implements IGhostKeyPair {
         combined.set(this.signingKeyPair.publicKey);
         combined.set(this.encryptionKeyPair.publicKey, this.signingKeyPair.publicKey.length);
 
-        // Use BLAKE3 for faster hashing (or SHA-256 as fallback)
-        let hash: Uint8Array;
-        try {
-            hash = blake3(combined);
-        } catch {
-            // Fallback to SHA-256 if BLAKE3 is not available
-            hash = sha256(combined);
-        }
+        // Use SHA-256 for consistent fingerprints (BLAKE3 might not be available)
+        const hash = sha256(combined);
 
         // Return full 256-bit fingerprint as hex
         return this.bytesToHex(hash);
@@ -629,7 +661,7 @@ export class GhostKeyPair implements IGhostKeyPair {
 
         return {
             version: this.version,
-            publicKey: this.bytesToHex(this.encryptionKeyPair.publicKey),
+            publicKey: this.bytesToHex(this.encryptionKeyPair.publicKey), // For backward compatibility
             identityPrivate: this.bytesToHex(this.signingKeyPair.privateKey),
             identityPublic: this.bytesToHex(this.signingKeyPair.publicKey),
             encryptionPrivate: this.bytesToHex(this.encryptionKeyPair.privateKey),
@@ -699,6 +731,8 @@ export class GhostKeyPair implements IGhostKeyPair {
 
         for (const [keyId, preKey] of this.preKeys) {
             if (preKey.usedAt && preKey.usedAt < cutoff) {
+                // Zero out the private key before deletion
+                preKey.privateKey.fill(0);
                 this.preKeys.delete(keyId);
                 removed++;
             }
@@ -728,9 +762,11 @@ export class GhostKeyPair implements IGhostKeyPair {
             combined.set(identityKey);
             combined.set(encryptionKey, identityKey.length);
 
+            // Use SHA-256 for consistent fingerprint verification
             const computedFingerprint = GhostKeyPair.bytesToHex(sha256(combined));
 
             if (computedFingerprint !== bundle.fingerprint) {
+                console.warn('Fingerprint mismatch in public key bundle');
                 return false;
             }
 
@@ -745,13 +781,15 @@ export class GhostKeyPair implements IGhostKeyPair {
                     new DataView(keyData.buffer).setUint32(publicKey.length, preKey.keyId, false);
 
                     if (!GhostKeyPair.verify(keyData, signature, identityKey)) {
+                        console.warn(`Invalid pre-key signature for keyId ${preKey.keyId}`);
                         return false;
                     }
                 }
             }
 
             return true;
-        } catch {
+        } catch (error) {
+            console.error('Error validating public key bundle:', error);
             return false;
         }
     }

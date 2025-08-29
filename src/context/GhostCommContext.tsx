@@ -331,13 +331,37 @@ export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     const handleBLEEvent = useCallback((event: BLEConnectionEvent | BLEMessageEvent | BLEDiscoveryEvent) => {
         switch (event.type) {
             case 'node_discovered':
+            case 'node_updated':
                 const discEvent = event as BLEDiscoveryEvent;
-                handleNodeDiscovered(discEvent.node);
+                if (discEvent.node) {
+                    handleNodeDiscovered(discEvent.node);
+                }
+                break;
+
+            case 'node_lost':
+                const lostEvent = event as BLEDiscoveryEvent;
+                if (lostEvent.node) {
+                    handleNodeLost(lostEvent.node.id);
+                }
                 break;
 
             case 'connected':
                 const connEvent = event as BLEConnectionEvent;
                 handleNodeConnected(connEvent.nodeId);
+                break;
+
+            case 'authenticated':
+                const authEvent = event as BLEConnectionEvent;
+                if (authEvent.session) {
+                    addSystemLog('SUCCESS', `Authenticated with ${authEvent.nodeId.substring(0, 8)}... (Protocol v2)`);
+                }
+                break;
+
+            case 'error':
+                const errorEvent = event as BLEConnectionEvent;
+                if (errorEvent.error) {
+                    addSystemLog('ERROR', `Connection error: ${errorEvent.error.message}`);
+                }
                 break;
 
             case 'disconnected':
@@ -347,6 +371,12 @@ export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
             case 'message_received':
                 const msgEvent = event as BLEMessageEvent;
+                if (msgEvent.verificationResult) {
+                    // Protocol v2: Check if message was verified
+                    if (!msgEvent.verificationResult.verified) {
+                        addSystemLog('WARN', `Unverified message from ${msgEvent.fromNodeId?.substring(0, 8)}...`);
+                    }
+                }
                 handleMessageReceived(msgEvent.message, msgEvent.fromNodeId);
                 break;
 
@@ -358,6 +388,11 @@ export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             case 'message_failed':
                 const failEvent = event as BLEMessageEvent;
                 handleMessageFailed(failEvent.message.messageId);
+                break;
+
+            case 'signature_verification_failed':
+                const sigFailEvent = event as BLEMessageEvent;
+                addSystemLog('ERROR', `Signature verification failed for message from ${sigFailEvent.fromNodeId}`);
                 break;
         }
     }, [handleNodeDiscovered, handleNodeConnected, handleNodeDisconnected, handleMessageReceived, handleMessageSent, handleMessageFailed]);
@@ -389,6 +424,16 @@ export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         }
     }, [addSystemLog]);
 
+
+    const handleNodeLost = useCallback((nodeId: string) => {
+        setDiscoveredNodes(prev => {
+            const updated = new Map(prev);
+            updated.delete(nodeId);
+            return updated;
+        });
+        addSystemLog('INFO', `Lost contact with ${nodeId.substring(0, 8)}...`);
+    }, [addSystemLog]);
+
     // Action implementations
     const sendMessage = useCallback(async (
         content: string,
@@ -416,17 +461,6 @@ export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
         setMessages(prev => [...prev, newMessage]);
 
-        // Track message flow
-        if (recipientId) {
-            const flows = messageFlowsRef.current;
-            if (!flows.has(recipientId)) {
-                flows.set(recipientId, new Map());
-            }
-            const nodeFlow = flows.get(recipientId)!;
-            const currentCount = nodeFlow.get('sent') || 0;
-            nodeFlow.set('sent', currentCount + 1);
-        }
-
         try {
             setMessages(prev =>
                 prev.map(msg =>
@@ -434,6 +468,7 @@ export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                 )
             );
 
+            // Use the base BLEManager methods which handle Protocol v2
             let bleMessageId: string;
             if (type === MessageType.BROADCAST) {
                 bleMessageId = await bleManager.broadcastMessage(content, MessagePriority.NORMAL);
@@ -456,6 +491,8 @@ export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                 lastUpdated: Date.now()
             }));
 
+            addSystemLog('SUCCESS', `Message sent (Protocol v2 signed)`);
+
         } catch (error) {
             setMessages(prev =>
                 prev.map(msg =>
@@ -471,7 +508,7 @@ export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
             throw error;
         }
-    }, [bleManager, keyPair]);
+    }, [bleManager, keyPair, addSystemLog]);
 
     const clearMessages = useCallback(async () => {
         setMessages([]);
@@ -487,51 +524,25 @@ export const GhostCommProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     const startScanning = useCallback(async () => {
         if (!bleManager || isScanning) return;
         try {
-            // Clean up any existing subscription properly
-            if (scanSubscriptionRef.current) {
-                try {
-                    if (typeof scanSubscriptionRef.current.remove === 'function') {
-                        scanSubscriptionRef.current.remove();
-                    } else if (typeof scanSubscriptionRef.current.unsubscribe === 'function') {
-                        scanSubscriptionRef.current.unsubscribe();
-                    }
-                } catch (e) {
-                    console.warn('Failed to clean up previous scan subscription:', e);
-                }
-                scanSubscriptionRef.current = null;
-            }
-
-            const subscription = await bleManager.start();
-            scanSubscriptionRef.current = subscription;
+            // The base manager's start() method handles both scanning and advertising
+            await bleManager.start();
             setIsScanning(true);
-            addSystemLog('SUCCESS', 'Scanning started');
+            setIsAdvertising(true); // Both happen together in Protocol v2
+            addSystemLog('SUCCESS', 'Mesh network started (Protocol v2)');
         } catch (error) {
-            addSystemLog('ERROR', 'Failed to start scanning', error);
+            addSystemLog('ERROR', 'Failed to start mesh network', error);
         }
     }, [bleManager, isScanning, addSystemLog]);
 
     const stopScanning = useCallback(async () => {
         if (!bleManager || !isScanning) return;
         try {
-            // Clean up subscription properly
-            if (scanSubscriptionRef.current) {
-                try {
-                    if (typeof scanSubscriptionRef.current.remove === 'function') {
-                        scanSubscriptionRef.current.remove();
-                    } else if (typeof scanSubscriptionRef.current.unsubscribe === 'function') {
-                        scanSubscriptionRef.current.unsubscribe();
-                    }
-                } catch (e) {
-                    console.warn('Failed to clean up scan subscription:', e);
-                }
-                scanSubscriptionRef.current = null;
-            }
-
             await bleManager.stop();
             setIsScanning(false);
-            addSystemLog('INFO', 'Scanning stopped');
+            setIsAdvertising(false);
+            addSystemLog('INFO', 'Mesh network stopped');
         } catch (error) {
-            addSystemLog('ERROR', 'Failed to stop scanning', error);
+            addSystemLog('ERROR', 'Failed to stop mesh network', error);
         }
     }, [bleManager, isScanning, addSystemLog]);
 
@@ -1206,7 +1217,7 @@ Usage: scenario <type>`;
     ⚠ Keep this private and secure!
 
     Fingerprint: ${keyPair.getFingerprint()}
-    Public Key: ${exported.publicKey.substring(0, 64)}...`;
+    Public Key: ${exported.publicKey?.substring(0, 64) || 'N/A'}...`;
 
                 case 'test':
                 case 'diagnostic':
@@ -1244,13 +1255,7 @@ Usage: scenario <type>`;
     useEffect(() => {
         const initializeGhostComm = async () => {
             try {
-                addSystemLog('INFO', 'Starting GhostComm initialization...');
-
-                // Load alias
-                const storedAlias = await AsyncStorage.getItem(STORAGE_KEYS.ALIAS);
-                if (storedAlias) {
-                    setAlias(storedAlias);
-                }
+                addSystemLog('INFO', 'Initializing GhostComm Protocol v2...');
 
                 // Load or generate keypair
                 let keys: IGhostKeyPair;
@@ -1261,31 +1266,46 @@ Usage: scenario <type>`;
                     const parsed = JSON.parse(storedKeys);
                     keys = GhostKeyPair.fromExported(parsed);
                 } else {
-                    addSystemLog('INFO', 'Generating new keypair');
-                    const newKeys = new GhostKeyPair();
-                    keys = newKeys as IGhostKeyPair;
-                    const exported = newKeys.exportKeys();
+                    addSystemLog('INFO', 'Generating new keypair (Ed25519/X25519)');
+                    keys = new GhostKeyPair();
+                    const exported = keys.exportKeys();
                     await AsyncStorage.setItem(STORAGE_KEYS.KEYPAIR, JSON.stringify(exported));
                 }
 
                 setKeyPair(keys);
-                addSystemLog('SUCCESS', `Node ID: ${keys.getFingerprint().substring(0, 8)}...`);
+                addSystemLog('SUCCESS', `Node ID: ${keys.getFingerprint().substring(0, 8)}... (Protocol v2)`);
 
                 // Create and initialize BLE manager
                 const manager = new ReactNativeBLEManager(keys);
                 setBleManager(manager);
 
-                // Set up event listeners
-                manager.onEvent((event: BLEConnectionEvent | BLEMessageEvent | BLEDiscoveryEvent) => {
-                    handleBLEEvent(event);
+                // Set up core event listeners for Protocol v2 events
+                manager.onEvent(handleBLEEvent);
+
+                // Set up discovery event listener
+                manager.onDiscovery((node: BLENode) => {
+                    handleNodeDiscovered(node);
                 });
 
+                // Set up message event listener with Protocol v2 verification
+                manager.onMessage(async (message: any, node: BLENode, session: any, verificationResult: any) => {
+                    if (verificationResult && !verificationResult.verified) {
+                        addSystemLog('WARN', `Unverified message from ${node.id.substring(0, 8)}...`);
+                    }
+                    handleMessageReceived(message, node.id);
+                });
+
+                // Set up React Native specific events
                 manager.onRNEvent('initialized', () => {
-                    addSystemLog('SUCCESS', 'BLE Manager initialized');
+                    addSystemLog('SUCCESS', 'BLE Manager initialized with Protocol v2');
                 });
 
                 manager.onRNEvent('error', (data: any) => {
                     addSystemLog('ERROR', `BLE Error: ${data.error}`);
+                });
+
+                manager.onRNEvent('bleStateChanged', (data: any) => {
+                    addSystemLog('INFO', `BLE state: ${data.currentState}`);
                 });
 
                 // Initialize manager
@@ -1296,12 +1316,11 @@ Usage: scenario <type>`;
 
                 setIsInitialized(true);
                 setIsContextReady(true);
-                addSystemLog('SUCCESS', 'GhostComm ready');
+                addSystemLog('SUCCESS', 'GhostComm Protocol v2 ready');
 
             } catch (error) {
-                setIsContextReady(true); // Set even on error to prevent hang
+                setIsContextReady(true);
                 addSystemLog('ERROR', 'Failed to initialize', error);
-                debug.error('Initialization failed', error);
             }
         };
 
