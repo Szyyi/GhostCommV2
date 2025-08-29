@@ -1,4 +1,4 @@
-# 👻 GhostComm
+#  GhostComm
 
 **Military-Grade Serverless P2P Messaging Over Bluetooth Mesh Networks**
 
@@ -381,7 +381,7 @@ MIT License - See [LICENSE](LICENSE) file for details.
 
 ##  Disclaimer
 
-GhostComm is experimental software. While we implement military-grade cryptography, this software has not been formally audited. Use at your own risk for sensitive communications.
+GhostComm is experimental software. While I have implemented military-grade cryptography, this software has not been formally audited. Use at your own risk for sensitive communications.
 
 ---
 
