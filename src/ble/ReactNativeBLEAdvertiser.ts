@@ -1,42 +1,45 @@
 // mobile/src/ble/ReactNativeBLEAdvertiser.ts
-import { BleManager } from 'react-native-ble-plx';
 import { Platform } from 'react-native';
+import BLEAdvertiser from 'react-native-ble-advertiser';
 import {
-    BLEAdvertiser,
+    BLEAdvertiser as BaseBLEAdvertiser,
     BLEAdvertisementData,
     BLE_CONFIG,
-    SECURITY_CONFIG,
     NodeCapability,
     DeviceType,
-    IdentityProof,
-    BLEPreKeyBundle,
-    IGhostKeyPair
+    IGhostKeyPair,
+    parseAdvertisementPacket
 } from '../../core';
-import { BLE_SECURITY_CONFIG, PreKeyBundle } from '../../core/src/ble/types';
+import { AdvertisementPacket } from '../../core/src/ble/advertiser';
+import { BLE_SECURITY_CONFIG } from '../../core/src/ble/types';
+import { Buffer } from 'buffer';
 
 /**
- * React Native BLE Advertiser Implementation for Protocol v2.0
- * 
- * LIMITATION: react-native-ble-plx doesn't support custom BLE advertising.
- * This implementation simulates advertising while maintaining Protocol v2.0 
- * packet format compatibility with FULL PUBLIC KEY inclusion.
+ * React Native BLE Advertiser for Protocol v2.1
+ * Uses react-native-ble-advertiser for actual BLE broadcasting
  */
-export class ReactNativeBLEAdvertiser extends BLEAdvertiser {
-    private bleManager: BleManager;
-    private simulatedAdvertisementData?: BLEAdvertisementData;
+export class ReactNativeBLEAdvertiser extends BaseBLEAdvertiser {
     private isInitialized: boolean = false;
+    // Note: isAdvertising is handled by base class
+    
+    // Platform capabilities
+    private capabilities = {
+        maxAdvertisementSize: 31,
+        supportsExtendedAdvertising: false,
+        androidApiLevel: 0
+    };
 
-    // Mesh tracking for platform-specific methods
+    // Mesh tracking
     private meshNodeCount: number = 0;
     private meshQueueSize: number = 0;
 
     constructor(keyPair?: IGhostKeyPair) {
         super(keyPair);
-        this.bleManager = new BleManager();
+        this.checkPlatformCapabilities();
     }
 
     /**
-     * Initialize BLE manager if not already initialized
+     * Initialize BLE advertiser
      */
     private async ensureInitialized(): Promise<void> {
         if (this.isInitialized) {
@@ -44,70 +47,112 @@ export class ReactNativeBLEAdvertiser extends BLEAdvertiser {
         }
 
         try {
-            // Check if BLE is powered on
-            const state = await this.bleManager.state();
-            if (state !== 'PoweredOn') {
-                console.log(`⏳ Waiting for BLE to power on (current state: ${state})`);
-                
-                // Wait for BLE to be powered on
-                await new Promise<void>((resolve) => {
-                    const subscription = this.bleManager.onStateChange((newState) => {
-                        if (newState === 'PoweredOn') {
-                            subscription.remove();
-                            resolve();
-                        }
-                    }, true);
-                });
+            // Request permissions on Android
+            if (Platform.OS === 'android') {
+                const granted = await BLEAdvertiser.requestBTPermissions();
+                if (!granted) {
+                    throw new Error('Bluetooth permissions not granted');
+                }
+                console.log('✅ Bluetooth permissions granted');
             }
 
+            // Enable Bluetooth adapter
+            await BLEAdvertiser.enableAdapter();
+            
             this.isInitialized = true;
-            console.log('✅ BLE Manager initialized for Protocol v2');
+            console.log('✅ BLE Advertiser initialized');
+
         } catch (error) {
-            console.error('❌ Failed to initialize BLE Manager:', error);
+            console.error('❌ Failed to initialize BLE Advertiser:', error);
             throw error;
         }
     }
 
     /**
-     * Start platform-specific advertising with binary packet
-     * Since I can't actually advertise, I simulate it with Protocol v2 compliance
+     * Start platform-specific advertising
      */
     protected async startPlatformAdvertising(packet: Uint8Array): Promise<void> {
         try {
-            // Ensure BLE is initialized
             await this.ensureInitialized();
 
-            // Parse the packet to understand what we would advertise
-            const parsedPacket = BLEAdvertiser.parseAdvertisementPacket(packet);
+            // Stop any existing advertisement
+            if (this.getStatus().isAdvertising) {
+                await BLEAdvertiser.stopBroadcast();
+            }
+
+            // Parse packet for validation
+            const parsedPacket = BaseBLEAdvertiser.parseAdvertisementPacket(packet);
             if (!parsedPacket) {
                 throw new Error('Invalid advertisement packet');
             }
 
-            // Verify Protocol v2
-            if (parsedPacket.version !== BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
-                console.warn(`⚠️ Advertisement version mismatch: expected ${BLE_SECURITY_CONFIG.PROTOCOL_VERSION}, got ${parsedPacket.version}`);
-            }
+            // Set service UUID
+            BLEAdvertiser.setServiceUUID(BLE_CONFIG.SERVICE_UUID);
 
-            // Store the simulated advertisement data with Protocol v2 fields
-            this.simulatedAdvertisementData = await this.packetToAdvertisementData(parsedPacket);
+            // Create truncated packet (BLE 4.x limited to 31 bytes)
+            const truncatedPacket = this.createTruncatedPacket(packet);
+            
+            // Convert to hex string for the library
+            const dataHex = Buffer.from(truncatedPacket).toString('hex');
+            
+            // Broadcast the data - this will update base class state
+            await BLEAdvertiser.broadcast(
+                BLE_CONFIG.SERVICE_UUID,  // Service UUID
+                dataHex,                   // Data as hex string
+                {}                         // Options
+            );
 
-            // Log Protocol v2 advertisement details
-            console.log(`📡 Simulating Protocol v2.0 advertisement:`);
-            console.log(`  - Version: ${parsedPacket.version}`);
-            console.log(`  - Ephemeral ID: ${this.bytesToHexString(parsedPacket.ephemeralId).substring(0, 16)}...`);
-            console.log(`  - Identity Hash: ${this.bytesToHexString(parsedPacket.identityHash).substring(0, 16)}...`);
-            console.log(`  - Public Key: ${this.simulatedAdvertisementData.identityProof.publicKey?.substring(0, 16)}...`);
-            console.log(`  - Sequence: ${parsedPacket.sequenceNumber}`);
-            console.log(`  - Packet size: ${packet.length} bytes (includes 32-byte public key)`);
-
-            // In a real implementation, I would use platform-specific BLE APIs here
-            // For iOS: CBPeripheralManager with extended advertising
-            // For Android: BluetoothLeAdvertiser with BLE 5.0 extended advertising
+            console.log(`📡 Started BLE advertisement:`);
+            console.log(`  - Packet size: ${truncatedPacket.length} bytes`);
+            console.log(`  - Service UUID: ${BLE_CONFIG.SERVICE_UUID}`);
 
         } catch (error) {
-            console.error('❌ Failed to start platform advertising:', error);
+            console.error('❌ Failed to start advertising:', error);
             throw error;
         }
+    }
+
+    /**
+     * Create truncated packet for BLE advertising
+     */
+    private createTruncatedPacket(fullPacket: Uint8Array): Uint8Array {
+        // BLE 4.x advertising limited to 31 bytes
+        // Include most important Protocol v2.1 fields:
+        // - Version (1 byte)
+        // - Flags (1 byte)
+        // - Ephemeral ID partial (8 bytes)
+        // - Identity hash (8 bytes)
+        // - Sequence hint (2 bytes)
+        // Total: 20 bytes
+        
+        const truncated = new Uint8Array(20);
+        let offset = 0;
+
+        // Version
+        truncated[offset++] = fullPacket[0];
+        
+        // Flags
+        truncated[offset++] = fullPacket[1];
+        
+        // Ephemeral ID (first 8 bytes)
+        if (fullPacket.length >= 18) {
+            truncated.set(fullPacket.slice(2, 10), offset);
+            offset += 8;
+        }
+        
+        // Identity hash (8 bytes)
+        if (fullPacket.length >= 26) {
+            truncated.set(fullPacket.slice(18, 26), offset);
+            offset += 8;
+        }
+        
+        // Sequence hint (2 bytes)
+        if (fullPacket.length >= 60) {
+            truncated[offset++] = fullPacket[58];
+            truncated[offset++] = fullPacket[59];
+        }
+
+        return truncated;
     }
 
     /**
@@ -115,75 +160,34 @@ export class ReactNativeBLEAdvertiser extends BLEAdvertiser {
      */
     protected async stopPlatformAdvertising(): Promise<void> {
         try {
-            this.simulatedAdvertisementData = undefined;
-            console.log('🛑 Stopped Protocol v2 advertising');
+            await BLEAdvertiser.stopBroadcast();
+            console.log('🛑 Stopped BLE advertising');
         } catch (error) {
-            console.error('❌ Failed to stop platform advertising:', error);
-            throw error;
+            console.error('❌ Failed to stop advertising:', error);
         }
     }
 
     /**
-     * Update platform advertising with new packet
+     * Update platform advertising
      */
     protected async updatePlatformAdvertising(packet: Uint8Array): Promise<void> {
-        try {
-            const parsedPacket = BLEAdvertiser.parseAdvertisementPacket(packet);
-            if (!parsedPacket) {
-                throw new Error('Invalid advertisement packet');
-            }
-
-            // Verify Protocol v2
-            if (parsedPacket.version !== BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
-                console.warn(`⚠️ Update packet version mismatch: expected ${BLE_SECURITY_CONFIG.PROTOCOL_VERSION}, got ${parsedPacket.version}`);
-            }
-
-            this.simulatedAdvertisementData = await this.packetToAdvertisementData(parsedPacket);
-            
-            // Only log every 10th update to reduce spam
-            if (parsedPacket.sequenceNumber % 10 === 0) {
-                console.log(`🔄 Updating Protocol v2 advertisement (seq: ${parsedPacket.sequenceNumber})`);
-            }
-
-        } catch (error) {
-            console.error('❌ Failed to update platform advertising:', error);
-            throw error;
-        }
+        // Need to restart with new packet
+        await this.startPlatformAdvertising(packet);
     }
 
     /**
-     * Check platform advertising capabilities for Protocol v2
+     * Check platform capabilities
      */
     protected async checkPlatformCapabilities(): Promise<{
         maxAdvertisementSize: number;
         supportsExtendedAdvertising: boolean;
         supportsPeriodicAdvertising: boolean;
     }> {
-        // Check BLE version and capabilities
-        const isIOS = Platform.OS === 'ios';
-        const isAndroid = Platform.OS === 'android';
-
-        if (isIOS) {
-            // iOS supports extended advertising from iOS 11+ with iPhone 8+
-            // Protocol v2 requires extended advertising for full public key
-            return {
-                maxAdvertisementSize: 31,  // Standard BLE 4.0 limit (too small for v2)
-                supportsExtendedAdvertising: false,  // Requires special entitlements
-                supportsPeriodicAdvertising: false
-            };
-        } else if (isAndroid) {
-            // Android supports extended advertising from API 26+ (Android 8.0)
+        if (Platform.OS === 'android') {
             const apiLevel = Platform.Version;
-            const supportsExtended = typeof apiLevel === 'number' && apiLevel >= 26;
-
-            return {
-                maxAdvertisementSize: supportsExtended ? 251 : 31,  // 251 bytes enough for Protocol v2
-                supportsExtendedAdvertising: supportsExtended,
-                supportsPeriodicAdvertising: false
-            };
+            this.capabilities.androidApiLevel = typeof apiLevel === 'number' ? apiLevel : 0;
         }
 
-        // Default/unknown platform
         return {
             maxAdvertisementSize: 31,
             supportsExtendedAdvertising: false,
@@ -192,21 +196,21 @@ export class ReactNativeBLEAdvertiser extends BLEAdvertiser {
     }
 
     /**
-     * Get current node count for mesh info
+     * Get node count
      */
     protected async getNodeCount(): Promise<number> {
         return this.meshNodeCount;
     }
 
     /**
-     * Get current queue size for mesh info
+     * Get queue size
      */
     protected async getQueueSize(): Promise<number> {
         return this.meshQueueSize;
     }
 
     /**
-     * Update mesh statistics (called by mesh network)
+     * Update mesh statistics
      */
     public updateMeshStats(nodeCount: number, queueSize: number): void {
         this.meshNodeCount = nodeCount;
@@ -214,220 +218,49 @@ export class ReactNativeBLEAdvertiser extends BLEAdvertiser {
     }
 
     /**
-     * Convert parsed packet back to advertisement data structure with Protocol v2 fields
-     * CRITICAL: This method MUST include the full public key for Protocol v2 compliance
-     */
-    private async packetToAdvertisementData(packet: any): Promise<BLEAdvertisementData> {
-        // Parse extended data for pre-key bundle if present
-        let preKeyBundle: PreKeyBundle | undefined;
-        if (packet.extendedData && packet.extendedData.length > 0) {
-            try {
-                const extendedStr = new TextDecoder().decode(packet.extendedData);
-                const parsed = JSON.parse(extendedStr);
-                
-                // Ensure pre-key bundle includes identity key for Protocol v2
-                if (parsed && !parsed.identityKey && this.keyPair) {
-                    parsed.identityKey = this.bytesToHexString(this.keyPair.getIdentityPublicKey());
-                }
-                
-                preKeyBundle = parsed;
-            } catch {
-                // Extended data might not be JSON, create minimal pre-key bundle
-                if (this.keyPair) {
-                    const preKeys = this.keyPair.generatePreKeys(1);
-                    if (preKeys.length > 0) {
-                        preKeyBundle = {
-                            identityKey: this.bytesToHexString(this.keyPair.getIdentityPublicKey()),
-                            signedPreKey: {
-                                keyId: preKeys[0].keyId,
-                                publicKey: this.bytesToHexString(preKeys[0].publicKey),
-                                signature: this.bytesToHexString(preKeys[0].signature)
-                            }
-                        };
-                    }
-                }
-            }
-        }
-
-        // PROTOCOL V2 CRITICAL: Include FULL public key in identity proof
-        const identityProof: IdentityProof = {
-            publicKeyHash: this.bytesToHexString(packet.identityHash),
-            // CRITICAL FOR V2: Must include full Ed25519 public key (32 bytes = 64 hex chars)
-            publicKey: this.keyPair ? this.bytesToHexString(this.keyPair.getIdentityPublicKey()) : '',
-            timestamp: packet.timestamp * 1000,  // Converts from seconds to ms
-            nonce: this.bytesToHexString(packet.ephemeralId).substring(0, 32),
-            signature: this.bytesToHexString(packet.signature),
-            preKeyBundle
-        };
-
-        // Verifies that I have a public key for Protocol v2
-        if (!identityProof.publicKey && BLE_SECURITY_CONFIG.REQUIRE_SIGNATURE_VERIFICATION) {
-            console.error('❌ Protocol v2 requires public key in advertisement');
-            // Still create the advertisement but mark as invalid
-        }
-
-        // Parse capability flags
-        const capabilities = this.parseCapabilityFlags(packet.flags);
-
-        // Create Protocol v2 compliant advertisement data
-        const advertisementData: BLEAdvertisementData = {
-            version: packet.version || BLE_SECURITY_CONFIG.PROTOCOL_VERSION,
-            ephemeralId: this.bytesToHexString(packet.ephemeralId),
-            identityProof,
-            timestamp: packet.timestamp * 1000,
-            sequenceNumber: packet.sequenceNumber,
-            capabilities,
-            deviceType: DeviceType.PHONE,
-            protocolVersion: packet.version || BLE_SECURITY_CONFIG.PROTOCOL_VERSION,
-            meshInfo: {
-                nodeCount: packet.meshInfo?.nodeCount || 0,
-                messageQueueSize: packet.meshInfo?.queueSize || 0,
-                routingTableVersion: packet.meshInfo?.routingTableVersion || 0,
-                beaconInterval: BLE_CONFIG.ADVERTISEMENT_INTERVAL
-            },
-            batteryLevel: packet.meshInfo?.batteryLevel || 100
-        };
-
-        return advertisementData;
-    }
-
-    /**
-     * Parse capability flags byte
-     */
-    private parseCapabilityFlags(flags: number): NodeCapability[] {
-        const capabilities: NodeCapability[] = [];
-
-        if (flags & 0x01) capabilities.push(NodeCapability.RELAY);
-        if (flags & 0x02) capabilities.push(NodeCapability.STORAGE);
-        if (flags & 0x04) capabilities.push(NodeCapability.BRIDGE);
-        if (flags & 0x08) capabilities.push(NodeCapability.GROUP_CHAT);
-        if (flags & 0x10) capabilities.push(NodeCapability.FILE_TRANSFER);
-        if (flags & 0x20) capabilities.push(NodeCapability.VOICE_NOTES);
-
-        return capabilities;
-    }
-
-    /**
-     * Convert bytes to hex string
-     */
-    private bytesToHexString(bytes: Uint8Array): string {
-        return Array.from(bytes)
-            .map(b => b.toString(16).padStart(2, '0'))
-            .join('');
-    }
-
-    /**
-     * Get simulated advertisement data (for testing/debugging)
-     */
-    public getSimulatedAdvertisementData(): BLEAdvertisementData | undefined {
-        return this.simulatedAdvertisementData;
-    }
-
-    /**
-     * Check if currently advertising via parent's status
+     * Check if currently advertising
+     * Note: Don't override base class private property
      */
     public isCurrentlyAdvertising(): boolean {
         return this.getStatus().isAdvertising;
     }
 
     /**
-     * Clean up resources
+     * Clean up
      */
     public async destroy(): Promise<void> {
-        const status = this.getStatus();
-        if (status.isAdvertising) {
+        if (this.getStatus().isAdvertising) {
             await this.stopAdvertising();
         }
-        this.simulatedAdvertisementData = undefined;
         this.isInitialized = false;
     }
 
     /**
-     * Get BLE state (for debugging)
+     * Test advertisement
      */
-    public async getBLEState(): Promise<string> {
+    public async testAdvertisement(): Promise<void> {
         try {
-            return await this.bleManager.state();
+            console.log('🧪 Testing BLE advertisement...');
+            
+            const testPacket = new Uint8Array(20);
+            testPacket[0] = BLE_SECURITY_CONFIG.PROTOCOL_VERSION;
+            testPacket[1] = 0x01;
+            
+            for (let i = 2; i < 20; i++) {
+                testPacket[i] = i;
+            }
+            
+            await this.startPlatformAdvertising(testPacket);
+            
+            console.log('✅ Test successful');
+            
+            setTimeout(() => {
+                this.stopPlatformAdvertising();
+            }, 3000);
+            
         } catch (error) {
-            return 'Unknown';
+            console.error('❌ Test failed:', error);
+            throw error;
         }
-    }
-
-    /**
-     * Platform-specific: Create iOS peripheral manager advertisement data
-     * This would be used with react-native-ble-peripheral or custom native module
-     * Protocol v2 requires extended advertising for the larger packet size
-     */
-    private createIOSAdvertisementData(packet: Uint8Array): any {
-        // In real implementation, this would create CBAdvertisementData
-        // Protocol v2 packet (~140 bytes) requires extended advertising
-        const needsExtended = packet.length > 31;
-        
-        return {
-            CBAdvertisementDataServiceUUIDsKey: [BLE_CONFIG.SERVICE_UUID],
-            CBAdvertisementDataLocalNameKey: `GC${packet[0]}`, // Version prefix
-            // For Protocol v2, TODO: need extended advertising to fit the public key
-            CBAdvertisementDataManufacturerDataKey: needsExtended ? undefined : packet.slice(0, 20),
-            // Extended advertising would include full packet
-            extendedData: needsExtended ? packet : undefined
-        };
-    }
-
-    /**
-     * Platform-specific: Create Android advertiser data
-     * This would be used with BluetoothLeAdvertiser
-     * Protocol v2 requires BLE 5.0 extended advertising on Android
-     */
-    private createAndroidAdvertisementData(packet: Uint8Array): any {
-        // In real implementation, this would create AdvertiseData
-        const needsExtended = packet.length > 31;
-        
-        return {
-            includeDeviceName: false,
-            includeTxPowerLevel: true,
-            addServiceUuid: BLE_CONFIG.SERVICE_UUID,
-            // Standard advertising can only fit partial data
-            addManufacturerData: !needsExtended ? {
-                manufacturerId: 0xFFFF,  // Custom manufacturer ID
-                manufacturerSpecificData: packet.slice(0, 20)  // First 20 bytes only
-            } : undefined,
-            // Extended advertising for Protocol v2 (requires Android 8.0+)
-            useExtendedAdvertising: needsExtended,
-            extendedData: needsExtended ? packet : undefined,
-            // Protocol v2 specific flag
-            protocolVersion: BLE_SECURITY_CONFIG.PROTOCOL_VERSION
-        };
-    }
-
-    /**
-     * Validate that advertisement meets Protocol v2 requirements
-     */
-    public validateProtocolV2Advertisement(): boolean {
-        if (!this.simulatedAdvertisementData) {
-            return false;
-        }
-
-        const ad = this.simulatedAdvertisementData;
-        
-        // Check Protocol v2 requirements
-        const hasVersion = ad.version === BLE_SECURITY_CONFIG.PROTOCOL_VERSION;
-        const hasPublicKey = !!ad.identityProof.publicKey && ad.identityProof.publicKey.length === 64;
-        const hasSignature = !!ad.identityProof.signature;
-        const hasTimestamp = !!ad.identityProof.timestamp;
-        const hasNonce = !!ad.identityProof.nonce;
-
-        if (!hasVersion || !hasPublicKey || !hasSignature || !hasTimestamp || !hasNonce) {
-            console.error('❌ Advertisement fails Protocol v2 validation:', {
-                hasVersion,
-                hasPublicKey,
-                hasSignature,
-                hasTimestamp,
-                hasNonce
-            });
-            return false;
-        }
-
-        console.log('✅ Advertisement passes Protocol v2 validation');
-        return true;
     }
 }

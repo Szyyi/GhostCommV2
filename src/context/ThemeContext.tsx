@@ -4,116 +4,186 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface Theme {
     name: string;
-    primary: string;      // Main color (was green #00FF00)
-    background: string;   // Terminal background
-    surface: string;      // UI panels background
+    primary: string;      // Main action color
+    background: string;   // Main background
+    surface: string;      // Card/panel backgrounds
     text: string;         // Primary text
-    textSecondary: string; // Secondary/dimmed text
-    error: string;        // Error messages
-    warning: string;      // Warning messages
-    border: string;       // Borders
+    textSecondary: string; // Secondary/muted text
+    textTertiary: string; // Disabled/very muted text
+    error: string;        // Error states
+    warning: string;      // Warning states
+    success: string;      // Success states
+    border: string;       // Border colors
+    divider: string;      // Divider lines
+    overlay: string;      // Modal overlays
 }
 
-// Predefined themes
+// Premium, minimal themes
 export const themes: { [key: string]: Theme } = {
+    mono: {
+        name: 'Monochrome',
+        primary: '#000000',
+        background: '#FFFFFF',
+        surface: '#F8F8F8',
+        text: '#000000',
+        textSecondary: '#666666',
+        textTertiary: '#999999',
+        error: '#FF3B30',
+        warning: '#FF9500',
+        success: '#34C759',
+        border: '#E5E5E5',
+        divider: '#F0F0F0',
+        overlay: 'rgba(0, 0, 0, 0.5)',
+    },
+    noir: {
+        name: 'Noir',
+        primary: '#FFFFFF',
+        background: '#000000',
+        surface: '#0A0A0A',
+        text: '#FFFFFF',
+        textSecondary: '#999999',
+        textTertiary: '#666666',
+        error: '#FF453A',
+        warning: '#FF9F0A',
+        success: '#30D158',
+        border: '#1C1C1C',
+        divider: '#1A1A1A',
+        overlay: 'rgba(255, 255, 255, 0.1)',
+    },
+    graphite: {
+        name: 'Graphite',
+        primary: '#000000',
+        background: '#F5F5F5',
+        surface: '#FFFFFF',
+        text: '#1A1A1A',
+        textSecondary: '#6C6C6C',
+        textTertiary: '#A0A0A0',
+        error: '#DC2626',
+        warning: '#F59E0B',
+        success: '#10B981',
+        border: '#D4D4D4',
+        divider: '#E5E5E5',
+        overlay: 'rgba(0, 0, 0, 0.4)',
+    },
+    midnight: {
+        name: 'Midnight',
+        primary: '#4A5FFF',
+        background: '#0A0B14',
+        surface: '#13141F',
+        text: '#FFFFFF',
+        textSecondary: '#8B92B9',
+        textTertiary: '#5A607A',
+        error: '#FF5555',
+        warning: '#FFB84D',
+        success: '#50FA7B',
+        border: '#1F2133',
+        divider: '#1A1C2E',
+        overlay: 'rgba(0, 0, 0, 0.7)',
+    },
+    paper: {
+        name: 'Paper',
+        primary: '#2C2C2C',
+        background: '#FAFAF8',
+        surface: '#FFFFFF',
+        text: '#2C2C2C',
+        textSecondary: '#757575',
+        textTertiary: '#B0B0B0',
+        error: '#D32F2F',
+        warning: '#F57C00',
+        success: '#388E3C',
+        border: '#E0E0E0',
+        divider: '#F5F5F5',
+        overlay: 'rgba(0, 0, 0, 0.3)',
+    },
+    ink: {
+        name: 'Ink',
+        primary: '#1A1A1A',
+        background: '#FFFEF9',
+        surface: '#FFFFF5',
+        text: '#1A1A1A',
+        textSecondary: '#606060',
+        textTertiary: '#909090',
+        error: '#B91C1C',
+        warning: '#D97706',
+        success: '#15803D',
+        border: '#D6D3C7',
+        divider: '#EEEBE2',
+        overlay: 'rgba(26, 26, 26, 0.4)',
+    },
+    sage: {
+        name: 'Sage',
+        primary: '#2F4F3A',
+        background: '#FAFBF8',
+        surface: '#FFFFFF',
+        text: '#1E1E1E',
+        textSecondary: '#5F6B5F',
+        textTertiary: '#9CA59C',
+        error: '#C84B4B',
+        warning: '#D4A04A',
+        success: '#5B8C5B',
+        border: '#DDE2D8',
+        divider: '#EFF1EC',
+        overlay: 'rgba(47, 79, 58, 0.3)',
+    },
+    carbon: {
+        name: 'Carbon',
+        primary: '#E5E5E5',
+        background: '#0D0D0D',
+        surface: '#1A1A1A',
+        text: '#E5E5E5',
+        textSecondary: '#A0A0A0',
+        textTertiary: '#606060',
+        error: '#FF6B6B',
+        warning: '#FFC107',
+        success: '#4CAF50',
+        border: '#2A2A2A',
+        divider: '#222222',
+        overlay: 'rgba(0, 0, 0, 0.8)',
+    },
+    minimal: {
+        name: 'Minimal',
+        primary: '#000000',
+        background: '#FFFFFF',
+        surface: '#FAFAFA',
+        text: '#000000',
+        textSecondary: '#737373',
+        textTertiary: '#A3A3A3',
+        error: '#EF4444',
+        warning: '#F59E0B',
+        success: '#10B981',
+        border: '#E5E5E5',
+        divider: '#F5F5F5',
+        overlay: 'rgba(0, 0, 0, 0.5)',
+    },
     classic: {
-        name: 'Classic Green',
+        name: 'Classic Terminal',
         primary: '#00FF00',
         background: '#000000',
         surface: '#0A0A0A',
         text: '#00FF00',
-        textSecondary: '#666666',
+        textSecondary: '#00AA00',
+        textTertiary: '#006600',
         error: '#FF3333',
         warning: '#FFAA00',
-        border: '#1a1a1a',
-    },
-    arctic: {
-        name: 'Arctic Blue',
-        primary: '#00FFFF',
-        background: '#000511',
-        surface: '#001122',
-        text: '#00FFFF',
-        textSecondary: '#5588AA',
-        error: '#FF6B6B',
-        warning: '#FFD93D',
-        border: '#003366',
-    },
-    amber: {
-        name: 'Amber',
-        primary: '#FFA500',
-        background: '#0A0500',
-        surface: '#1A0F00',
-        text: '#FFA500',
-        textSecondary: '#806030',
-        error: '#FF4444',
-        warning: '#FFFF00',
-        border: '#332200',
-    },
-    matrix: {
-        name: 'Matrix',
-        primary: '#00FF41',
-        background: '#0D0208',
-        surface: '#1A0D11',
-        text: '#00FF41',
-        textSecondary: '#008F11',
-        error: '#FF0000',
-        warning: '#FFD300',
-        border: '#003B00',
-    },
-    daylight: {
-        name: 'Daylight',
-        primary: '#000000',
-        background: '#FFFFFF',
-        surface: '#F5F5F5',
-        text: '#000000',
-        textSecondary: '#666666',
-        error: '#CC0000',
-        warning: '#FF8800',
-        border: '#DDDDDD',
-    },
-    highContrast: {
-        name: 'High Contrast',
-        primary: '#FFFFFF',
-        background: '#000000',
-        surface: '#111111',
-        text: '#FFFFFF',
-        textSecondary: '#AAAAAA',
-        error: '#FF0000',
-        warning: '#FFFF00',
-        border: '#FFFFFF',
-    },
-    ocean: {
-        name: 'Ocean',
-        primary: '#4A9EFF',
-        background: '#001020',
-        surface: '#002040',
-        text: '#4A9EFF',
-        textSecondary: '#6080A0',
-        error: '#FF6B6B',
-        warning: '#FFB84D',
-        border: '#003060',
-    },
-    sunset: {
-        name: 'Sunset',
-        primary: '#FF6B35',
-        background: '#1A0A05',
-        surface: '#2A1510',
-        text: '#FF6B35',
-        textSecondary: '#AA6040',
-        error: '#FF0040',
-        warning: '#FFD700',
-        border: '#552211',
+        success: '#00FF00',
+        border: '#003300',
+        divider: '#001100',
+        overlay: 'rgba(0, 255, 0, 0.1)',
     },
     custom: {
         name: 'Custom',
-        primary: '#00FF00',
-        background: '#000000',
-        surface: '#0A0A0A',
-        text: '#00FF00',
+        primary: '#000000',
+        background: '#FFFFFF',
+        surface: '#F8F8F8',
+        text: '#000000',
         textSecondary: '#666666',
-        error: '#FF3333',
-        warning: '#FFAA00',
-        border: '#1a1a1a',
+        textTertiary: '#999999',
+        error: '#FF3B30',
+        warning: '#FF9500',
+        success: '#34C759',
+        border: '#E5E5E5',
+        divider: '#F0F0F0',
+        overlay: 'rgba(0, 0, 0, 0.5)',
     }
 };
 
@@ -136,9 +206,9 @@ export const useTheme = () => {
 };
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    const [themeName, setThemeName] = useState<string>('classic');
-    const [currentTheme, setCurrentTheme] = useState<Theme>(themes.classic);
-    const [customColor, setCustomColorState] = useState<string>('#00FF00');
+    const [themeName, setThemeName] = useState<string>('mono');
+    const [currentTheme, setCurrentTheme] = useState<Theme>(themes.mono);
+    const [customColor, setCustomColorState] = useState<string>('#000000');
 
     // Load saved theme on mount
     useEffect(() => {
@@ -160,7 +230,11 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                             ...themes.custom,
                             primary: savedCustomColor,
                             text: savedCustomColor,
-                            textSecondary: savedCustomColor + '99', // Add transparency
+                            // Calculate secondary colors based on primary
+                            textSecondary: adjustColorOpacity(savedCustomColor, 0.7),
+                            textTertiary: adjustColorOpacity(savedCustomColor, 0.5),
+                            border: adjustColorOpacity(savedCustomColor, 0.2),
+                            divider: adjustColorOpacity(savedCustomColor, 0.1),
                         };
                         setCurrentTheme(customTheme);
                     } else {
@@ -184,7 +258,10 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     ...themes.custom,
                     primary: customColor,
                     text: customColor,
-                    textSecondary: customColor + '99',
+                    textSecondary: adjustColorOpacity(customColor, 0.7),
+                    textTertiary: adjustColorOpacity(customColor, 0.5),
+                    border: adjustColorOpacity(customColor, 0.2),
+                    divider: adjustColorOpacity(customColor, 0.1),
                 };
                 setCurrentTheme(customTheme);
             } else {
@@ -206,7 +283,10 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 ...themes.custom,
                 primary: color,
                 text: color,
-                textSecondary: color + '99',
+                textSecondary: adjustColorOpacity(color, 0.7),
+                textTertiary: adjustColorOpacity(color, 0.5),
+                border: adjustColorOpacity(color, 0.2),
+                divider: adjustColorOpacity(color, 0.1),
             };
 
             // If currently using custom theme, apply immediately
@@ -234,3 +314,19 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         </ThemeContext.Provider>
     );
 };
+
+// Helper function to adjust color opacity
+function adjustColorOpacity(color: string, opacity: number): string {
+    // If it's already an rgba/rgb color, parse and adjust
+    if (color.startsWith('rgb')) {
+        return color.replace(/[\d.]+\)$/g, `${opacity})`);
+    }
+    
+    // Convert hex to rgba
+    const hex = color.replace('#', '');
+    const r = parseInt(hex.substring(0, 2), 16);
+    const g = parseInt(hex.substring(2, 4), 16);
+    const b = parseInt(hex.substring(4, 6), 16);
+    
+    return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+}

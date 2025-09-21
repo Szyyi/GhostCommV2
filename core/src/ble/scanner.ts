@@ -1,5 +1,14 @@
 // core/src/ble/scanner.ts
-// Enhanced BLE Scanner with Protocol v2 cryptographic verification
+// ================================================================================================
+// BLE Scanner with Protocol v2.1 Cryptographic Verification and Discovery
+// ================================================================================================
+//
+// This module implements the secure BLE scanning and node discovery layer for the GhostComm
+// mesh network system. It provides comprehensive node discovery, cryptographic verification,
+// and Protocol v2.1 security validation for all discovered mesh participants.
+//
+// @author LCpl Szymon 'Si' Procak
+// @version 2.1
 
 import {
     BLENode,
@@ -18,7 +27,10 @@ import {
     BLEError,
     BLEErrorCode,
     RouteMetrics,
-    RelayStatistics
+    RelayStatistics,
+    ScanResult,
+    ScanConfig,
+    ScanFilter
 } from './types';
 import {
     IGhostKeyPair,
@@ -28,59 +40,18 @@ import {
 import { BLEAdvertiser } from './advertiser';
 
 /**
- * Enhanced scan result with Protocol v2 security metadata
- */
-export interface ScanResult {
-    deviceId: string;                    // Platform-specific device ID
-    advertisementData: BLEAdvertisementData;
-    rssi: number;                        // Signal strength
-    txPower?: number;                    // Transmission power
-    distance?: number;                   // Estimated distance
-    timestamp: number;                   // Discovery timestamp
-    rawData?: Uint8Array;               // Raw advertisement packet
-    isVerified: boolean;                // Signature verification status
-    verificationError?: string;          // Verification failure reason
-    protocolVersion: number;            // Protocol version detected
-}
-
-/**
- * Node tracking information with Protocol v2 enhancements
+ * Node tracking information with Protocol v2.1 enhancements and trust management
  */
 interface NodeTracker {
     node: BLENode;
-    advertisements: ScanResult[];        // Recent advertisements
-    rssiHistory: number[];              // Signal strength history
-    lastVerified: number;               // Last verification timestamp
-    verificationAttempts: number;       // Verification attempt count
-    trustScore: number;                 // Computed trust score
-    ephemeralIds: Map<string, number>; // Seen ephemeral IDs
-    publicKeyExtracted: boolean;        // Protocol v2: Public key extracted from ad
-    publicKeyVerified: boolean;         // Protocol v2: Public key verified
-}
-
-/**
- * Scan filter configuration
- */
-export interface ScanFilter {
-    serviceUUID?: string;               // Filter by service UUID
-    minRssi?: number;                  // Minimum signal strength
-    maxDistance?: number;              // Maximum distance
-    capabilities?: NodeCapability[];   // Required capabilities
-    verifiedOnly?: boolean;           // Only verified nodes
-    trustedOnly?: boolean;            // Only trusted nodes
-    minProtocolVersion?: number;       // Minimum protocol version
-}
-
-/**
- * Scan configuration
- */
-export interface ScanConfig {
-    interval: number;                   // Scan interval in ms
-    window: number;                    // Scan window in ms
-    duplicates: boolean;               // Allow duplicate advertisements
-    activeScan: boolean;              // Active vs passive scanning
-    filters?: ScanFilter[];           // Scan filters
-    requireProtocolV2?: boolean;      // Require Protocol v2 nodes
+    advertisements: ScanResult[];
+    rssiHistory: number[];
+    lastVerified: number;
+    verificationAttempts: number;
+    trustScore: number;
+    ephemeralIds: Map<string, number>;
+    publicKeyExtracted: boolean;
+    publicKeyVerified: boolean;
 }
 
 // Callback types
@@ -88,48 +59,52 @@ export type ScanCallback = (result: ScanResult) => void;
 export type DiscoveryCallback = (event: BLEDiscoveryEvent) => void;
 export type VerificationCallback = (nodeId: string, result: VerificationResult) => void;
 
+
+
+
 /**
- * Enhanced BLE Scanner with Protocol v2 security features
+ * Enhanced BLE Scanner with Protocol v2.1 Security Features and Intelligent Discovery
  */
 export abstract class BLEScanner {
-    // State management
+    // ===== OPERATIONAL STATE MANAGEMENT =====
     private isScanning: boolean = false;
     private isPaused: boolean = false;
     private scanConfig: ScanConfig;
 
-    // Node tracking
+    // ===== NODE TRACKING AND DISCOVERY STATE =====
     private nodeTrackers: Map<string, NodeTracker>;
-    private ephemeralIdMap: Map<string, string>; // Ephemeral ID -> Node ID
+    private ephemeralIdMap: Map<string, string>;
     private verifiedNodes: Map<string, VerificationResult>;
     private blockedNodes: Set<string>;
 
-    // Protocol v2: Public key tracking
+    // ===== PROTOCOL v2 CRYPTOGRAPHIC STATE =====
     private publicKeyCache: Map<string, {
         identityKey: Uint8Array;
         encryptionKey?: Uint8Array;
         timestamp: number;
     }>;
 
-    // Security components
+    // ===== SECURITY VALIDATION COMPONENTS =====
     protected keyPair?: IGhostKeyPair;
-    private replayProtection: Map<string, Set<number>>; // Node ID -> Sequence numbers
+    private replayProtection: Map<string, Set<number>>;
     private signatureCache: Map<string, boolean>;
 
-    // Callbacks
+    // ===== EVENT HANDLING AND CALLBACKS =====
     private scanCallbacks: Set<ScanCallback>;
     private discoveryCallbacks: Set<DiscoveryCallback>;
     private verificationCallbacks: Set<VerificationCallback>;
 
-    // Timers
+    // ===== OPERATIONAL TIMERS AND MAINTENANCE =====
     private nodeTimeoutTimer?: NodeJS.Timeout;
     private verificationTimer?: NodeJS.Timeout;
-    private cleanupTimer?: NodeJS.Timeout;
+    // Changed from private to protected to allow subclass access
+    protected cleanupTimer?: NodeJS.Timeout;
 
-    // Rate limiting
+    // ===== PERFORMANCE AND RATE LIMITING =====
     private discoveryRateLimit: Map<string, number>;
     private lastDiscoveryTime: number = 0;
 
-    // Statistics
+    // ===== PERFORMANCE STATISTICS AND MONITORING =====
     private statistics = {
         totalScans: 0,
         advertisementsReceived: 0,
@@ -145,10 +120,13 @@ export abstract class BLEScanner {
         publicKeysExtracted: 0
     };
 
+    /**
+     * Initialize BLE scanner with comprehensive security and discovery capabilities
+     */
     constructor(keyPair?: IGhostKeyPair) {
         this.keyPair = keyPair;
 
-        // Initialize collections
+        // Initialize tracking data structures
         this.nodeTrackers = new Map();
         this.ephemeralIdMap = new Map();
         this.verifiedNodes = new Map();
@@ -158,28 +136,33 @@ export abstract class BLEScanner {
         this.discoveryRateLimit = new Map();
         this.publicKeyCache = new Map();
 
-        // Initialize callbacks
+        // Initialize callback management
         this.scanCallbacks = new Set();
         this.discoveryCallbacks = new Set();
         this.verificationCallbacks = new Set();
 
-        // Default scan configuration with Protocol v2 awareness
+        // Establish default scan configuration optimized for Protocol v2
         this.scanConfig = {
             interval: BLE_CONFIG.SCAN_INTERVAL,
             window: BLE_CONFIG.SCAN_WINDOW,
             duplicates: false,
             activeScan: true,
             filters: [],
-            requireProtocolV2: BLE_SECURITY_CONFIG.REQUIRE_SIGNATURE_VERIFICATION
+            requireProtocolV2: BLE_SECURITY_CONFIG.REQUIRE_SIGNATURE_VERIFICATION,
+            // React Native specific defaults
+            filterByService: false,
+            lowPower: false,
+            aggressive: false,
+            singleDevice: false,
+            batchResults: false,
+            dutyCycle: false
         };
 
-        // Start cleanup timer
+        // Initialize maintenance systems
         this.startCleanupTimer();
     }
 
-    /**
-     * Platform-specific scanning implementation
-     */
+    // ===== PLATFORM ABSTRACTION LAYER =====
     protected abstract startPlatformScanning(config: ScanConfig): Promise<void>;
     protected abstract stopPlatformScanning(): Promise<void>;
     protected abstract setPlatformScanFilters(filters: ScanFilter[]): Promise<void>;
@@ -190,8 +173,10 @@ export abstract class BLEScanner {
         supportsBackgroundScan: boolean;
     }>;
 
+    // ===== CORE DISCOVERY OPERATIONS =====
+
     /**
-     * Start secure scanning with Protocol v2 verification
+     * Start comprehensive BLE scanning with Protocol v2.1 security verification
      */
     async startScanning(config?: Partial<ScanConfig>): Promise<void> {
         if (this.isScanning && !this.isPaused) {
@@ -202,18 +187,18 @@ export abstract class BLEScanner {
         try {
             console.log(`Starting secure BLE scanning (Protocol v${BLE_SECURITY_CONFIG.PROTOCOL_VERSION} ${this.scanConfig.requireProtocolV2 ? 'required' : 'preferred'})`);
 
-            // Merge configuration
+            // Merge provided configuration with existing defaults
             if (config) {
                 this.scanConfig = { ...this.scanConfig, ...config };
             }
 
-            // Validate configuration
+            // Validate merged configuration
             this.validateScanConfig();
 
-            // Check platform capabilities
+            // Query platform capabilities
             const capabilities = await this.checkPlatformCapabilities();
 
-            // Apply filters if supported
+            // Configure scan filters
             if (this.scanConfig.filters && this.scanConfig.filters.length > 0) {
                 if (this.scanConfig.filters.length > capabilities.maxScanFilters) {
                     console.warn(`Too many filters (${this.scanConfig.filters.length}), using first ${capabilities.maxScanFilters}`);
@@ -222,14 +207,14 @@ export abstract class BLEScanner {
                 await this.setPlatformScanFilters(this.scanConfig.filters);
             }
 
-            // Start platform scanning
+            // Initialize platform-specific BLE scanning
             await this.startPlatformScanning(this.scanConfig);
 
-            // Update state
+            // Update operational state
             this.isScanning = true;
             this.isPaused = false;
 
-            // Start timers
+            // Start maintenance timers
             this.startNodeTimeoutTimer();
             this.startVerificationTimer();
 
@@ -246,7 +231,7 @@ export abstract class BLEScanner {
     }
 
     /**
-     * Handle scan result from platform with Protocol v2 verification
+     * Process discovered BLE advertisements with Protocol v2.1 verification
      */
     protected async handleScanResult(
         deviceId: string,
@@ -255,38 +240,39 @@ export abstract class BLEScanner {
         txPower?: number
     ): Promise<void> {
         try {
-            // Update statistics
             this.statistics.advertisementsReceived++;
             this.updateRssiStatistics(rssi);
 
-            // Parse advertisement packet
+            // Parse raw advertisement data
             const packet = BLEAdvertiser.parseAdvertisementPacket(rawData);
             if (!packet) {
                 console.warn('Failed to parse advertisement packet');
                 return;
             }
 
-            // Convert packet to advertisement data with Protocol v2 awareness
+            // Convert to Protocol v2-aware advertisement structure
             const advertisementData = await this.packetToAdvertisementDataV2(packet);
             if (!advertisementData) {
                 console.warn('Failed to convert packet to advertisement data');
                 return;
             }
 
-            // Check protocol version requirements
+            // Enforce Protocol v2 requirements if configured
             if (this.scanConfig.requireProtocolV2 && advertisementData.version < BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
                 console.log(`Ignoring Protocol v${advertisementData.version} node (v${BLE_SECURITY_CONFIG.PROTOCOL_VERSION} required)`);
                 return;
             }
 
-            // Check if node is blocked
+            // Resolve node identity
             const nodeId = await this.resolveNodeId(advertisementData);
+            
+            // Check blacklist
             if (this.blockedNodes.has(nodeId)) {
                 console.log(`Blocked node detected: ${nodeId}`);
                 return;
             }
 
-            // Protocol v2: Extract and cache public key if available
+            // Extract and cache public key
             let publicKeyExtracted = false;
             if (packet.publicKey && advertisementData.version >= BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
                 this.cachePublicKey(nodeId, packet.publicKey, packet);
@@ -294,7 +280,7 @@ export abstract class BLEScanner {
                 this.statistics.publicKeysExtracted++;
             }
 
-            // Verify advertisement signature with Protocol v2
+            // Verify advertisement signature
             const isVerified = await this.verifyAdvertisementV2(advertisementData, packet, nodeId);
 
             // Check replay protection
@@ -309,16 +295,16 @@ export abstract class BLEScanner {
                 return;
             }
 
-            // Check rate limiting
+            // Check discovery rate limit
             if (!this.checkDiscoveryRateLimit(nodeId)) {
                 console.warn(`Discovery rate limit exceeded for ${nodeId}`);
                 return;
             }
 
-            // Calculate distance if TX power available
+            // Calculate distance
             const distance = txPower ? this.calculateDistance(rssi, txPower) : undefined;
 
-            // Create scan result with Protocol v2 info
+            // Create scan result
             const scanResult: ScanResult = {
                 deviceId,
                 advertisementData,
@@ -332,10 +318,10 @@ export abstract class BLEScanner {
                 protocolVersion: advertisementData.version
             };
 
-            // Notify scan callbacks
+            // Notify callbacks
             this.notifyScanCallbacks(scanResult);
 
-            // Update node discovery with Protocol v2 tracking
+            // Update node discovery
             await this.updateNodeDiscoveryV2(scanResult, nodeId, publicKeyExtracted);
 
         } catch (error) {
@@ -344,11 +330,58 @@ export abstract class BLEScanner {
     }
 
     /**
-     * Convert packet to advertisement data with Protocol v2 support
+     * Emit scan error to discovery callbacks
+     * This method was missing and causing TypeScript errors
+     */
+    protected emitScanError(error: {
+        code: string;
+        message: string;
+        timestamp: number;
+    }): void {
+        console.error(`[BLE Scanner Error] ${error.code}: ${error.message}`);
+        
+        // Create error event - you might want to extend BLEDiscoveryEvent to support error type
+        const errorEvent: BLEDiscoveryEvent = {
+            type: 'node_lost', // Using existing type, ideally add 'error' type
+            node: {
+                id: 'error',
+                name: 'Error Node',
+                identityKey: new Uint8Array(32),
+                encryptionKey: new Uint8Array(32),
+                isConnected: false,
+                lastSeen: error.timestamp,
+                firstSeen: error.timestamp,
+                rssi: -100,
+                lastRSSI: -100,
+                verificationStatus: VerificationStatus.UNVERIFIED,
+                trustScore: 0,
+                protocolVersion: 0,
+                capabilities: [],
+                deviceType: DeviceType.PHONE,
+                supportedAlgorithms: [],
+                isRelay: false,
+                bluetoothAddress: '',
+                canSee: undefined
+            } as BLENode,
+            rssi: -100,
+            timestamp: error.timestamp
+        };
+        
+        // Notify all discovery callbacks about the error
+        for (const callback of this.discoveryCallbacks) {
+            try {
+                callback(errorEvent);
+            } catch (err) {
+                console.error('Error in discovery callback:', err);
+            }
+        }
+    }
+
+    /**
+     * Convert parsed advertisement packet to Protocol v2-aware advertisement data
      */
     private async packetToAdvertisementDataV2(packet: any): Promise<BLEAdvertisementData | null> {
         try {
-            // Parse extended data if present
             let preKeyBundle: PreKeyBundle | undefined;
             let extendedInfo: any = {};
             
@@ -361,7 +394,6 @@ export abstract class BLEScanner {
                         preKeyBundle = extended.preKeyBundle;
                     }
                     
-                    // Protocol v2: Extract additional info
                     if (extended.supportedAlgorithms) {
                         extendedInfo.supportedAlgorithms = extended.supportedAlgorithms;
                     }
@@ -369,27 +401,22 @@ export abstract class BLEScanner {
                         extendedInfo.protocolRequirements = extended.protocolRequirements;
                     }
                 } catch {
-                    // Extended data might not be JSON
+                    // Extended data parsing failed, continue with base data
                 }
             }
 
-            // Create identity proof with Protocol v2 public key
             const identityProof: IdentityProof = {
                 publicKeyHash: this.bytesToHex(packet.identityHash),
-                ...(packet.publicKey && { publicKey: this.bytesToHex(packet.publicKey) }), // Protocol v2
-                timestamp: packet.timestamp * 1000, // Convert to ms
+                publicKey: packet.publicKey ? this.bytesToHex(packet.publicKey) : undefined,
+                timestamp: packet.timestamp * 1000,
                 nonce: this.bytesToHex(packet.ephemeralId).substring(0, 32),
                 signature: this.bytesToHex(packet.signature),
                 preKeyBundle
             };
 
-            // Parse capabilities from flags
             const capabilities = this.parseCapabilityFlags(packet.flags);
-
-            // Detect protocol version
             const protocolVersion = packet.meshInfo?.protocolVersion || packet.version;
 
-            // Create advertisement data
             const advertisementData: BLEAdvertisementData = {
                 version: packet.version,
                 ephemeralId: this.bytesToHex(packet.ephemeralId),
@@ -397,7 +424,7 @@ export abstract class BLEScanner {
                 timestamp: packet.timestamp * 1000,
                 sequenceNumber: packet.sequenceNumber,
                 capabilities,
-                deviceType: DeviceType.PHONE, // Would determine from flags
+                deviceType: DeviceType.PHONE,
                 protocolVersion,
                 meshInfo: {
                     nodeCount: packet.meshInfo.nodeCount,
@@ -408,7 +435,6 @@ export abstract class BLEScanner {
                 batteryLevel: packet.meshInfo.batteryLevel
             };
 
-            // Track Protocol v2 nodes
             if (protocolVersion >= BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
                 this.statistics.protocolV2Nodes++;
             }
@@ -422,21 +448,20 @@ export abstract class BLEScanner {
     }
 
     /**
-     * Cache public key from Protocol v2 advertisement
+     * Cache public key from Protocol v2+ advertisement
      */
     private cachePublicKey(nodeId: string, publicKeyBytes: Uint8Array, packet: any): void {
-        // Store the full public key for future verification
         this.publicKeyCache.set(nodeId, {
             identityKey: publicKeyBytes,
-            encryptionKey: packet.encryptionKey, // If available
+            encryptionKey: packet.encryptionKey,
             timestamp: Date.now()
         });
         
-        console.log(`Cached public key for node ${nodeId} from Protocol v2 advertisement`);
+        console.log(`Cached public key for node ${nodeId} from Protocol v${packet.version} advertisement`);
     }
 
     /**
-     * Verify advertisement signature with Protocol v2 requirements
+     * Verify advertisement signature with Protocol v2+ validation
      */
     private async verifyAdvertisementV2(
         data: BLEAdvertisementData,
@@ -444,24 +469,23 @@ export abstract class BLEScanner {
         nodeId: string
     ): Promise<boolean> {
         try {
-            // Check signature cache
+            if (data.version < BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
+                return true;
+            }
+
             const cacheKey = `${data.ephemeralId}-${data.sequenceNumber}`;
             const cached = this.signatureCache.get(cacheKey);
             if (cached !== undefined) {
                 return cached;
             }
 
-            // Protocol v2: Get public key from advertisement or cache
             let publicKey: Uint8Array | undefined;
             
             if (data.identityProof.publicKey) {
-                // Public key included in advertisement (Protocol v2)
                 publicKey = this.hexToBytes(data.identityProof.publicKey);
             } else if (packet.publicKey) {
-                // Public key in packet
                 publicKey = packet.publicKey;
             } else {
-                // Try to get from cache or node tracker
                 const cachedKey = this.publicKeyCache.get(nodeId);
                 if (cachedKey) {
                     publicKey = cachedKey.identityKey;
@@ -474,7 +498,6 @@ export abstract class BLEScanner {
             }
 
             if (!publicKey) {
-                // Can't verify without public key
                 if (BLE_SECURITY_CONFIG.REQUIRE_SIGNATURE_VERIFICATION) {
                     console.warn(`Cannot verify advertisement from ${nodeId} - no public key available`);
                 }
@@ -482,21 +505,12 @@ export abstract class BLEScanner {
                 return false;
             }
 
-            // Recreate signing data with Protocol v2 format
             const signingData = this.createSigningDataV2(data);
-
-            // Verify signature
             const signature = this.hexToBytes(data.identityProof.signature);
-            const isValid = await this.verifySignature(
-                signingData,
-                signature,
-                publicKey
-            );
+            const isValid = await this.verifySignature(signingData, signature, publicKey);
 
-            // Cache result
             this.signatureCache.set(cacheKey, isValid);
 
-            // Limit cache size
             if (this.signatureCache.size > 1000) {
                 const firstKey = this.signatureCache.keys().next().value;
                 if (firstKey) {
@@ -517,13 +531,13 @@ export abstract class BLEScanner {
     }
 
     /**
-     * Create signing data with Protocol v2 format
+     * Create signing data for Protocol v2.1 signature verification
      */
     private createSigningDataV2(data: BLEAdvertisementData): Uint8Array {
         const parts = [
             data.ephemeralId,
             data.identityProof.publicKeyHash,
-            data.identityProof.publicKey || '', // Include public key for v2
+            data.identityProof.publicKey || '',
             data.identityProof.timestamp.toString(),
             data.identityProof.nonce,
             data.sequenceNumber.toString(),
@@ -534,7 +548,7 @@ export abstract class BLEScanner {
     }
 
     /**
-     * Update node discovery with Protocol v2 tracking
+     * Update node discovery tracking with Protocol v2.1 enhancements
      */
     private async updateNodeDiscoveryV2(
         scanResult: ScanResult,
@@ -543,12 +557,10 @@ export abstract class BLEScanner {
     ): Promise<void> {
         const { advertisementData, rssi, distance } = scanResult;
 
-        // Get or create tracker
         let tracker = this.nodeTrackers.get(nodeId);
         const isNewNode = !tracker;
 
         if (!tracker) {
-            // Create new node with Protocol v2 awareness
             const node: BLENode = await this.createNodeFromAdvertisementV2(
                 nodeId,
                 advertisementData,
@@ -576,7 +588,6 @@ export abstract class BLEScanner {
         if (publicKeyExtracted && !tracker.publicKeyExtracted) {
             tracker.publicKeyExtracted = true;
             
-            // Update node keys from cache
             const cachedKeys = this.publicKeyCache.get(nodeId);
             if (cachedKeys) {
                 tracker.node.identityKey = cachedKeys.identityKey;
@@ -588,7 +599,6 @@ export abstract class BLEScanner {
             }
         }
 
-        // Mark as verified if signature was valid
         if (scanResult.isVerified && !tracker.publicKeyVerified) {
             tracker.publicKeyVerified = true;
             tracker.lastVerified = Date.now();
@@ -601,35 +611,24 @@ export abstract class BLEScanner {
         tracker.node.distance = distance;
         tracker.node.protocolVersion = advertisementData.protocolVersion;
 
-        // Track advertisement
         tracker.advertisements.push(scanResult);
         if (tracker.advertisements.length > 10) {
             tracker.advertisements.shift();
         }
 
-        // Track RSSI history
         tracker.rssiHistory.push(rssi);
         if (tracker.rssiHistory.length > 20) {
             tracker.rssiHistory.shift();
         }
 
-        // Track ephemeral ID
         tracker.ephemeralIds.set(advertisementData.ephemeralId, Date.now());
-
-        // Update trust score with Protocol v2 bonus
         tracker.trustScore = this.calculateTrustScoreV2(tracker, scanResult);
         tracker.node.trustScore = tracker.trustScore;
-
-        // Update capabilities
         tracker.node.capabilities = advertisementData.capabilities;
         tracker.node.batteryLevel = advertisementData.batteryLevel;
 
-        // Handle pre-keys if present
         if (advertisementData.identityProof.preKeyBundle) {
-            await this.handlePreKeyBundle(
-                tracker.node,
-                advertisementData.identityProof.preKeyBundle
-            );
+            await this.handlePreKeyBundle(tracker.node, advertisementData.identityProof.preKeyBundle);
         }
 
         // Emit discovery event
@@ -645,10 +644,8 @@ export abstract class BLEScanner {
             };
 
             this.emitDiscoveryEvent(event);
-
         } else {
-            // Update event for existing node
-            if (Date.now() - tracker.lastVerified > 60000) { // Re-verify every minute
+            if (Date.now() - tracker.lastVerified > 60000) {
                 this.scheduleVerification(nodeId);
             }
 
@@ -673,35 +670,30 @@ export abstract class BLEScanner {
         rssi: number,
         distance?: number
     ): Promise<BLENode> {
-        // Extract keys from advertisement or cache
         let identityKey: Uint8Array | undefined;
         let encryptionKey: Uint8Array | undefined;
         let preKeys: PreKey[] | undefined;
 
-        // Protocol v2: Check for public key in advertisement
         if (ad.identityProof.publicKey) {
             identityKey = this.hexToBytes(ad.identityProof.publicKey);
         }
 
-        // Check cache
         const cachedKeys = this.publicKeyCache.get(nodeId);
         if (cachedKeys) {
             identityKey = identityKey || cachedKeys.identityKey;
             encryptionKey = cachedKeys.encryptionKey;
         }
 
-        // Extract from pre-key bundle if available
         if (ad.identityProof.preKeyBundle) {
             identityKey = identityKey || this.hexToBytes(ad.identityProof.preKeyBundle.identityKey);
             encryptionKey = encryptionKey || this.hexToBytes(ad.identityProof.preKeyBundle.signedPreKey.publicKey);
 
-            // Convert pre-keys
             if (ad.identityProof.preKeyBundle.oneTimePreKeys) {
                 preKeys = ad.identityProof.preKeyBundle.oneTimePreKeys.map((pk, index) => ({
                     keyId: pk.keyId,
                     publicKey: this.hexToBytes(pk.publicKey),
-                    privateKey: new Uint8Array(0), // Not available
-                    signature: new Uint8Array(0), // Would need to extract
+                    privateKey: new Uint8Array(0),
+                    signature: new Uint8Array(0),
                     createdAt: Date.now()
                 }));
             }
@@ -728,7 +720,7 @@ export abstract class BLEScanner {
             deviceType: ad.deviceType,
             supportedAlgorithms: [CryptoAlgorithm.ED25519, CryptoAlgorithm.X25519],
             isRelay: ad.capabilities.includes(NodeCapability.RELAY),
-            bluetoothAddress: '', // Would get from platform
+            bluetoothAddress: '',
             batteryLevel: ad.batteryLevel,
             canSee: undefined
         };
@@ -742,7 +734,6 @@ export abstract class BLEScanner {
     private calculateTrustScoreV2(tracker: NodeTracker, scanResult: ScanResult): number {
         let score = 0;
 
-        // Verification status (0-40 points)
         if (scanResult.isVerified) {
             score += 20;
         }
@@ -753,7 +744,6 @@ export abstract class BLEScanner {
             score += 10;
         }
 
-        // Protocol v2 bonus (0-10 points)
         if (scanResult.protocolVersion >= BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
             score += 5;
         }
@@ -764,7 +754,6 @@ export abstract class BLEScanner {
             score += 2;
         }
 
-        // Signal stability (0-20 points)
         if (tracker.rssiHistory.length >= 5) {
             const variance = this.calculateVariance(tracker.rssiHistory);
             if (variance < 5) score += 20;
@@ -772,13 +761,11 @@ export abstract class BLEScanner {
             else if (variance < 15) score += 5;
         }
 
-        // Presence duration (0-20 points)
         const presenceDuration = Date.now() - tracker.node.firstSeen;
-        if (presenceDuration > 3600000) score += 20; // 1 hour
-        else if (presenceDuration > 600000) score += 10; // 10 minutes
-        else if (presenceDuration > 60000) score += 5; // 1 minute
+        if (presenceDuration > 3600000) score += 20;
+        else if (presenceDuration > 600000) score += 10;
+        else if (presenceDuration > 60000) score += 5;
 
-        // Advertisement consistency (0-10 points)
         const successRate = tracker.verificationAttempts > 0
             ? (tracker.verificationAttempts - this.statistics.verificationFailures) / tracker.verificationAttempts
             : 0;
@@ -787,10 +774,8 @@ export abstract class BLEScanner {
         return Math.min(100, score);
     }
 
-    // ... [Include all other methods from original scanner.ts] ...
-
     /**
-     * Stop scanning
+     * Stop secure BLE scanning and cleanup
      */
     async stopScanning(): Promise<void> {
         if (!this.isScanning) {
@@ -798,7 +783,7 @@ export abstract class BLEScanner {
         }
 
         try {
-            console.log('Stopping BLE scanning...');
+            console.log('Stopping secure BLE scanning...');
 
             await this.stopPlatformScanning();
 
@@ -808,7 +793,7 @@ export abstract class BLEScanner {
             this.isScanning = false;
             this.isPaused = false;
 
-            console.log('BLE scanning stopped');
+            console.log('Secure BLE scanning stopped successfully');
 
         } catch (error) {
             console.error('Failed to stop BLE scanning:', error);
@@ -817,7 +802,7 @@ export abstract class BLEScanner {
     }
 
     /**
-     * Resolve node ID from advertisement
+     * Resolve ephemeral identifier to stable node identity
      */
     private async resolveNodeId(data: BLEAdvertisementData): Promise<string> {
         const existingNodeId = this.ephemeralIdMap.get(data.ephemeralId);
@@ -838,6 +823,9 @@ export abstract class BLEScanner {
         return nodeId;
     }
 
+    /**
+     * Verify cryptographic signature
+     */
     private async verifySignature(
         data: Uint8Array,
         signature: Uint8Array,
@@ -849,6 +837,9 @@ export abstract class BLEScanner {
         return false;
     }
 
+    /**
+     * Process pre-key bundle
+     */
     private handlePreKeyBundle(node: BLENode, bundle: PreKeyBundle): Promise<void> {
         node.identityKey = this.hexToBytes(bundle.identityKey);
         node.encryptionKey = this.hexToBytes(bundle.signedPreKey.publicKey);
@@ -863,11 +854,13 @@ export abstract class BLEScanner {
             }));
         }
 
-        console.log(`Updated keys for node ${node.id}`);
+        console.log(`Updated cryptographic keys for node ${node.id} from pre-key bundle`);
         return Promise.resolve();
     }
 
-    // Include all timer, filter, and utility methods...
+    /**
+     * Check replay protection
+     */
     private checkReplayProtection(nodeId: string, sequenceNumber: number): boolean {
         let sequences = this.replayProtection.get(nodeId);
 
@@ -890,6 +883,9 @@ export abstract class BLEScanner {
         return true;
     }
 
+    /**
+     * Apply scan filters
+     */
     private applyFilters(
         ad: BLEAdvertisementData,
         rssi: number,
@@ -927,6 +923,9 @@ export abstract class BLEScanner {
         return false;
     }
 
+    /**
+     * Check discovery rate limit
+     */
     private checkDiscoveryRateLimit(nodeId: string): boolean {
         const now = Date.now();
         const lastTime = this.discoveryRateLimit.get(nodeId) || 0;
@@ -939,12 +938,18 @@ export abstract class BLEScanner {
         return true;
     }
 
+    /**
+     * Calculate distance from RSSI
+     */
     private calculateDistance(rssi: number, txPower: number): number {
         const pathLossExponent = 2.5;
         const distance = Math.pow(10, (txPower - rssi) / (10 * pathLossExponent));
         return Math.max(0.1, Math.min(100, distance));
     }
 
+    /**
+     * Update RSSI statistics
+     */
     private updateRssiStatistics(rssi: number): void {
         this.statistics.averageRssi =
             (this.statistics.averageRssi * 0.95) + (rssi * 0.05);
@@ -957,6 +962,9 @@ export abstract class BLEScanner {
         }
     }
 
+    /**
+     * Validate scan configuration
+     */
     private validateScanConfig(): void {
         if (this.scanConfig.interval < 100 || this.scanConfig.interval > 10000) {
             throw new Error('Scan interval must be between 100ms and 10s');
@@ -967,6 +975,9 @@ export abstract class BLEScanner {
         }
     }
 
+    /**
+     * Parse capability flags
+     */
     private parseCapabilityFlags(flags: number): NodeCapability[] {
         const capabilities: NodeCapability[] = [];
 
@@ -980,18 +991,27 @@ export abstract class BLEScanner {
         return capabilities;
     }
 
+    /**
+     * Calculate variance
+     */
     private calculateVariance(values: number[]): number {
         const mean = values.reduce((a, b) => a + b, 0) / values.length;
         const squaredDiffs = values.map(v => Math.pow(v - mean, 2));
         return Math.sqrt(squaredDiffs.reduce((a, b) => a + b, 0) / values.length);
     }
 
+    /**
+     * Convert bytes to hex
+     */
     private bytesToHex(bytes: Uint8Array): string {
         return Array.from(bytes)
             .map(b => b.toString(16).padStart(2, '0'))
             .join('');
     }
 
+    /**
+     * Convert hex to bytes
+     */
     private hexToBytes(hex: string): Uint8Array {
         const bytes = new Uint8Array(hex.length / 2);
         for (let i = 0; i < hex.length; i += 2) {
@@ -1000,7 +1020,8 @@ export abstract class BLEScanner {
         return bytes;
     }
 
-    // Timers
+    // ===== TIMERS =====
+
     private startNodeTimeoutTimer(): void {
         this.nodeTimeoutTimer = setInterval(() => {
             this.checkForStaleNodes();
@@ -1089,9 +1110,8 @@ export abstract class BLEScanner {
             }
         }
 
-        // Clean old public key cache entries
         for (const [nodeId, entry] of this.publicKeyCache) {
-            if (now - entry.timestamp > 3600000) { // 1 hour
+            if (now - entry.timestamp > 3600000) {
                 this.publicKeyCache.delete(nodeId);
             }
         }
@@ -1123,7 +1143,8 @@ export abstract class BLEScanner {
         console.log(`Removed node: ${nodeId}`);
     }
 
-    // Callbacks
+    // ===== CALLBACKS =====
+
     private notifyScanCallbacks(result: ScanResult): void {
         for (const callback of this.scanCallbacks) {
             try {
@@ -1154,7 +1175,8 @@ export abstract class BLEScanner {
         }
     }
 
-    // Public API
+    // ===== PUBLIC API =====
+
     onScanResult(callback: ScanCallback): void {
         this.scanCallbacks.add(callback);
     }

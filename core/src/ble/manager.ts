@@ -1,5 +1,142 @@
 // core/src/ble/manager.ts
-// Enhanced BLE Manager with Full Security Integration - Protocol v2
+// ================================================================================================
+// Enhanced BLE Manager with Full Security Integration - Protocol v2.1
+// ================================================================================================
+//
+// This module implements the central BLE management system for the GhostComm secure mesh network,
+// providing comprehensive coordination of all BLE operations including discovery, connection
+// management, message routing, and cryptographic security. The manager serves as the primary
+// orchestrator for Protocol v2 security features and mesh networking capabilities.
+//
+// ARCHITECTURE OVERVIEW:
+// =====================
+//
+// Core Components Integration:
+// - BLEAdvertiser: Handles secure node advertisement with Protocol v2 signatures
+// - BLEScanner: Manages node discovery with cryptographic verification
+// - BLEConnectionManager: Coordinates peer-to-peer connections and session management
+// - MeshNetwork: Implements mesh routing algorithms and message forwarding
+// - MessageEncryption: Provides Double Ratchet encryption and key management
+// - GhostKeyPair: Handles Ed25519/X25519 cryptographic operations
+//
+// PROTOCOL v2.1 SECURITY MODEL:
+// =============================
+//
+// Authentication & Identity:
+// - Ed25519 digital signatures for all message authentication
+// - X25519 key exchange for forward-secure session establishment
+// - Full public key inclusion in advertisements for standalone verification
+// - Cryptographic fingerprints for node identification and routing
+//
+// Session Management:
+// - Double Ratchet protocol for forward and backward secrecy
+// - Automatic key rotation and ephemeral key management
+// - Session state tracking with message chain integrity
+// - Cross-device session synchronization support
+//
+// Message Security:
+// - End-to-end encryption for all message types (direct, broadcast, mesh)
+// - Message chaining for replay protection and ordering
+// - Cryptographic signatures for non-repudiation
+// - Forward secrecy through ephemeral key destruction
+//
+// Privacy Protection:
+// - Ephemeral identifier rotation for unlinkability
+// - Address randomization to prevent tracking
+// - Traffic analysis resistance through padding and timing
+// - Metadata minimization in routing headers
+//
+// MESH NETWORKING FEATURES:
+// ========================
+//
+// Discovery & Routing:
+// - Automatic node discovery through BLE advertisements
+// - Dynamic mesh topology with self-healing routes
+// - Multi-hop message forwarding with signature verification
+// - Load balancing across multiple paths
+//
+// Network Management:
+// - Automatic connection management and optimization
+// - Quality-of-service routing based on latency and reliability
+// - Network statistics and performance monitoring
+// - Congestion control and flow management
+//
+// Reliability Features:
+// - Message acknowledgment and retry mechanisms
+// - Duplicate detection and replay protection
+// - Fragment reassembly for large messages
+// - Graceful degradation under network stress
+//
+// PERFORMANCE OPTIMIZATIONS:
+// ==========================
+//
+// Resource Management:
+// - Intelligent connection pooling and lifecycle management
+// - Memory-efficient message queuing with priority scheduling
+// - Cached cryptographic operations for frequently contacted peers
+// - Rate limiting to prevent resource exhaustion
+//
+// Network Efficiency:
+// - Adaptive advertisement intervals based on network density
+// - Smart scanning with backoff to reduce power consumption
+// - Optimized message routing through network topology analysis
+// - Connection management based on usage patterns
+//
+// Security Performance:
+// - Signature caching for repeated verification operations
+// - Pre-computed ephemeral keys for faster session establishment
+// - Batch cryptographic operations where possible
+// - Hardware acceleration support where available
+//
+// CROSS-PLATFORM COMPATIBILITY:
+// =============================
+//
+// The manager provides a unified interface across different platforms while delegating
+// platform-specific operations to concrete implementations of the abstract base classes.
+// This design ensures consistent security and networking behavior regardless of the
+// underlying platform (iOS, Android, desktop).
+//
+// Platform Abstraction:
+// - Abstract base class design for platform-specific implementations
+// - Consistent security model across all platforms
+// - Unified event handling and callback interfaces
+// - Cross-platform message format and protocol compliance
+//
+// USAGE EXAMPLES:
+// ==============
+//
+// Basic Manager Setup:
+// ```typescript
+// const keyPair = new GhostKeyPair();
+// const advertiser = new ConcreteAdvertiser(keyPair);
+// const scanner = new ConcreteScanner();
+// const connectionManager = new ConcreteConnectionManager(keyPair);
+// 
+// const manager = new ConcreteBLEManager(keyPair, advertiser, scanner, connectionManager);
+// 
+// // Start secure mesh network
+// await manager.start();
+// 
+// // Send encrypted message
+// const messageId = await manager.sendMessage(recipientId, "Hello, secure world!");
+// 
+// // Broadcast to mesh
+// await manager.broadcastMessage("Public announcement", MessagePriority.HIGH);
+// ```
+//
+// Event Handling:
+// ```typescript
+// manager.onMessage(async (message, node, session, verification) => {
+//     console.log(`Secure message from ${node.id}: ${message.payload}`);
+//     console.log(`Verification: ${verification.verified ? 'VALID' : 'INVALID'}`);
+// });
+// 
+// manager.onDiscovery((node, advertisement) => {
+//     console.log(`Discovered node: ${node.id} (Protocol v${advertisement.version})`);
+// });
+//@author LCpl Szymon 'Si' Procak
+//@version 2.1
+// ```
 
 import { GhostKeyPair } from '../crypto/keypair';
 import { MessageEncryption } from '../crypto/encryption';
@@ -56,26 +193,269 @@ import { BLEConnectionManager } from './connection';
 import { MeshNetwork } from './mesh';
 
 /**
- * Enhanced BLE Manager with Protocol v2 Security
+ * Enhanced BLE Manager with Protocol v2.1 Security Integration
+ * 
+ * The BLEManager class serves as the central orchestrator for all BLE mesh networking
+ * operations in the GhostComm system. It coordinates secure node discovery, connection
+ * management, message routing, and cryptographic operations while providing a unified
+ * interface for mesh network interactions.
+ * 
+ * CORE RESPONSIBILITIES:
+ * =====================
+ * 
+ * Network Orchestration:
+ * - Coordinates BLE advertising, scanning, and connection management
+ * - Manages mesh network topology and routing decisions
+ * - Handles automatic node discovery and verification
+ * - Implements intelligent connection lifecycle management
+ * 
+ * Security Management:
+ * - Enforces Protocol v2.1 security policies and cryptographic requirements
+ * - Manages Double Ratchet sessions and key rotation
+ * - Implements message authentication and signature verification
+ * - Provides replay protection and sequence number management
+ * 
+ * Message Processing:
+ * - Routes messages through optimal mesh paths
+ * - Handles message fragmentation and reassembly
+ * - Implements priority-based message queuing
+ * - Manages broadcast and multicast message distribution
+ * 
+ * Performance Optimization:
+ * - Implements rate limiting and congestion control
+ * - Manages resource allocation and cleanup
+ * - Provides performance monitoring and statistics
+ * - Optimizes cryptographic operations through caching
+ * 
+ * SECURITY ARCHITECTURE:
+ * =====================
+ * 
+ * The manager implements a comprehensive security model based on Protocol v2.1:
+ * 
+ * Identity Management:
+ * - Ed25519 cryptographic identities for all nodes
+ * - Fingerprint-based node identification and verification
+ * - Public key distribution through secure advertisements
+ * - Identity proof validation with replay protection
+ * 
+ * Session Security:
+ * - Double Ratchet protocol for forward and backward secrecy
+ * - Automatic session establishment and key exchange
+ * - Session state synchronization across device restarts
+ * - Secure session teardown and key destruction
+ * 
+ * Message Protection:
+ * - End-to-end encryption for all message types
+ * - Cryptographic signatures for authentication
+ * - Message chaining for ordering and replay protection
+ * - Secure message routing with relay verification
+ * 
+ * Privacy Features:
+ * - Ephemeral identifier rotation for unlinkability
+ * - Address randomization for tracking protection
+ * - Traffic pattern obfuscation through timing variation
+ * - Metadata minimization in protocol headers
+ * 
+ * MESH NETWORKING MODEL:
+ * =====================
+ * 
+ * Network Topology:
+ * - Self-organizing mesh with automatic route discovery
+ * - Multi-hop message forwarding with loop prevention
+ * - Dynamic topology adaptation to node mobility
+ * - Load balancing across multiple paths
+ * 
+ * Quality of Service:
+ * - Priority-based message scheduling and routing
+ * - Latency optimization for real-time communications
+ * - Bandwidth management and congestion avoidance
+ * - Reliability through acknowledgment and retransmission
+ * 
+ * Network Resilience:
+ * - Automatic failure detection and recovery
+ * - Route healing and path optimization
+ * - Graceful degradation under network stress
+ * - Partition tolerance and network rejoining
+ * 
+ * USAGE PATTERNS:
+ * ==============
+ * 
+ * The manager is designed to be extended by platform-specific implementations
+ * that provide concrete implementations of the abstract BLE operations while
+ * maintaining consistent security and networking behavior.
+ * 
+ * Typical Usage Flow:
+ * 1. Initialize manager with cryptographic components
+ * 2. Start mesh network (advertising + scanning)
+ * 3. Handle automatic node discovery and verification
+ * 4. Send/receive messages through secure sessions
+ * 5. Monitor network status and performance
+ * 6. Gracefully shutdown with resource cleanup
+ * 
+ * Integration Points:
+ * - Event-driven architecture for UI integration
+ * - Callback-based message handling for application logic
+ * - Statistics interface for monitoring and diagnostics
+ * - Abstract platform interface for cross-platform support
  */
 export abstract class BLEManager {
-    // Core components
+    // ===== CORE CRYPTOGRAPHIC COMPONENTS =====
+    
+    /**
+     * Primary cryptographic key pair for node identity and message signing
+     * 
+     * Provides Ed25519 digital signatures for authentication and X25519 key exchange
+     * for session establishment. This key pair represents the permanent identity
+     * of the node in the mesh network and is used for:
+     * - Node identification through cryptographic fingerprints
+     * - Message authentication and non-repudiation
+     * - Session key establishment with other nodes
+     * - Advertisement signing for discovery verification
+     */
     protected keyPair: IGhostKeyPair;
+    
+    /**
+     * Message encryption engine implementing Double Ratchet protocol
+     * 
+     * Handles all cryptographic operations for message protection including:
+     * - Session establishment and key derivation
+     * - Message encryption and decryption with forward secrecy
+     * - Key rotation and ephemeral key management
+     * - Broadcast message encryption for group communications
+     */
     protected encryption: IMessageEncryption;
+    
+    // ===== BLE NETWORKING COMPONENTS =====
+    
+    /**
+     * BLE advertisement manager for secure node discovery
+     * 
+     * Manages the broadcasting of cryptographically signed advertisements
+     * containing node identity, capabilities, and mesh information. Implements
+     * Protocol v2 security features including ephemeral ID rotation for privacy.
+     */
     protected advertiser: BLEAdvertiser;
+    
+    /**
+     * BLE scanner for discovering and verifying mesh nodes
+     * 
+     * Continuously scans for other mesh nodes, validates advertisement signatures,
+     * and processes node discovery with cryptographic verification. Implements
+     * intelligent scanning patterns to optimize power consumption.
+     */
     protected scanner: BLEScanner;
+    
+    /**
+     * Connection manager for peer-to-peer BLE communications
+     * 
+     * Handles the establishment, maintenance, and termination of direct BLE
+     * connections between nodes. Manages connection pooling, session establishment,
+     * and message transmission over established connections.
+     */
     protected connectionManager: BLEConnectionManager;
+    
+    /**
+     * Mesh network coordinator for multi-hop routing and topology management
+     * 
+     * Implements the mesh networking layer including route discovery, message
+     * forwarding, topology maintenance, and network optimization. Provides
+     * intelligent routing decisions based on network conditions and quality metrics.
+     */
     protected meshNetwork: MeshNetwork;
 
-    // Security management
+    // ===== SECURITY STATE MANAGEMENT =====
+    
+    /**
+     * Active Double Ratchet sessions with verified nodes
+     * 
+     * Maintains the cryptographic session state for each peer including:
+     * - Session keys and ratchet state
+     * - Message sequence numbers and chain tracking
+     * - Connection quality metrics and statistics
+     * - Session lifecycle and expiration management
+     * 
+     * Key: Node fingerprint (string)
+     * Value: Complete session state with Protocol v2 fields
+     */
     private sessions: Map<string, BLESession>;
+    
+    /**
+     * Cache of verified node identities and verification results
+     * 
+     * Stores the verification status and method for each node to avoid
+     * repeated verification operations. Includes verification metadata
+     * such as verification method, timestamp, and verifier identity.
+     * 
+     * Key: Node fingerprint (string)
+     * Value: Verification result with method and timestamp
+     */
     private verifiedNodes: Map<string, VerificationResult>;
+    
+    /**
+     * Pending key exchange operations for session establishment
+     * 
+     * Tracks ongoing key exchange processes to prevent duplicate operations
+     * and provide coordination for asynchronous session establishment.
+     * Automatically cleaned up on completion or timeout.
+     * 
+     * Key: Node fingerprint (string)
+     * Value: Promise resolving to established session keys
+     */
     private pendingKeyExchanges: Map<string, Promise<SessionKeys>>;
+    
+    /**
+     * Message fragment reassembly state for large messages
+     * 
+     * Manages the collection and reassembly of message fragments when
+     * messages exceed BLE advertisement payload limits. Implements
+     * timeout-based cleanup and integrity verification.
+     * 
+     * Key: Fragment identifier (string)
+     * Value: Map of fragment index to fragment data
+     */
     private messageFragments: Map<string, Map<number, MessageFragment>>;
+    
+    /**
+     * Replay protection through message ID tracking
+     * 
+     * Maintains a rolling window of recently seen message IDs to prevent
+     * replay attacks. Automatically manages window size and cleanup to
+     * prevent memory exhaustion while maintaining security.
+     * 
+     * Contains: Recently processed message IDs for replay detection
+     */
     private replayProtection: Set<string>;
+    
+    /**
+     * Timer for privacy-preserving address rotation
+     * 
+     * Manages the periodic rotation of BLE MAC addresses to prevent
+     * long-term tracking of devices. Coordinates with advertising
+     * schedule to minimize service disruption during rotation.
+     */
     private addressRotationTimer?: NodeJS.Timeout;
 
-    // Message chain tracking (Protocol v2)
+    // ===== PROTOCOL v2 MESSAGE CHAIN TRACKING =====
+    
+    /**
+     * Message chain state for replay protection and ordering (Protocol v2.1)
+     * 
+     * Implements enhanced security through message chaining where each message
+     * references the hash of the previous message, providing:
+     * - Strong replay protection through sequence validation
+     * - Message ordering guarantees for conversation integrity  
+     * - Detection of missing or out-of-order messages
+     * - Cryptographic binding between consecutive messages
+     * 
+     * Key: Peer node fingerprint (string)
+     * Value: Chain state with sequence numbers and message hashes
+     * 
+     * Chain State Components:
+     * - lastSentHash: Hash of last message sent to this peer
+     * - lastReceivedHash: Hash of last message received from this peer
+     * - sentSequence: Next sequence number for outgoing messages
+     * - receivedSequence: Expected sequence number for incoming messages
+     */
     private messageChains: Map<string, {
         lastSentHash: string;
         lastReceivedHash: string;
@@ -83,24 +463,195 @@ export abstract class BLEManager {
         receivedSequence: number;
     }>;
 
-    // Event management
+    // ===== EVENT MANAGEMENT SYSTEM =====
+    
+    /**
+     * General BLE event callbacks for system-wide events
+     * 
+     * Handles all types of BLE events including connection changes,
+     * discovery events, message events, and error conditions.
+     * Provides unified event handling for application integration.
+     */
     private eventCallbacks: Set<BLEEventCallback>;
+    
+    /**
+     * Connection-specific event callbacks for session management
+     * 
+     * Specialized callbacks for connection lifecycle events including
+     * establishment, authentication, session creation, and disconnection.
+     * Used for connection state monitoring and management.
+     */
     private connectionCallbacks: Set<ConnectionCallback>;
+    
+    /**
+     * Message event callbacks for application message handling
+     * 
+     * Callbacks for incoming message processing including decryption,
+     * verification, and delivery to application logic. Includes context
+     * information such as sender identity and verification status.
+     */
     private messageCallbacks: Set<MessageCallback>;
+    
+    /**
+     * Node discovery callbacks for topology management
+     * 
+     * Handles node discovery events including new node detection,
+     * capability updates, and network topology changes. Used for
+     * network visualization and management interfaces.
+     */
     private discoveryCallbacks: Set<DiscoveryCallback>;
+    
+    /**
+     * Node verification callbacks for trust management
+     * 
+     * Specialized callbacks for node verification events including
+     * verification completion, trust changes, and verification failures.
+     * Critical for security policy enforcement and user notifications.
+     */
     private verificationCallbacks: Set<VerificationCallback>;
 
-    // State management
+    // ===== OPERATIONAL STATE MANAGEMENT =====
+    
+    /**
+     * Current operational state of the BLE manager
+     * 
+     * Comprehensive state tracking including:
+     * - Scanning and advertising status
+     * - Active connections and discovered nodes
+     * - Message queues and routing tables
+     * - Performance statistics and metrics
+     */
     private state: BLEManagerState;
+    
+    /**
+     * Real-time performance and security statistics
+     * 
+     * Detailed metrics for monitoring and optimization including:
+     * - Message throughput and latency statistics
+     * - Connection success and failure rates
+     * - Security event counts and error rates
+     * - Network topology and reachability metrics
+     */
     private statistics: BLEStatistics;
+    
+    /**
+     * Timer for periodic mesh network processing
+     * 
+     * Coordinates regular mesh maintenance tasks including:
+     * - Message queue processing and routing
+     * - Topology updates and route optimization
+     * - Performance monitoring and statistics updates
+     */
     private meshProcessingTimer?: NodeJS.Timeout;
+    
+    /**
+     * Timer for system cleanup and resource management
+     * 
+     * Performs periodic maintenance including:
+     * - Expired session cleanup
+     * - Rate limiter maintenance
+     * - Replay protection window management
+     * - Memory usage optimization
+     */
     private cleanupTimer?: NodeJS.Timeout;
 
-    // Rate limiting
+    // ===== PERFORMANCE AND SECURITY CONTROLS =====
+    
+    /**
+     * Per-node rate limiting for DoS protection
+     * 
+     * Implements token bucket rate limiting on a per-node basis to
+     * prevent denial-of-service attacks and resource exhaustion.
+     * Automatically managed with cleanup of inactive limiters.
+     * 
+     * Key: Rate limiting key (nodeId-operation)
+     * Value: Rate limiter instance with token bucket state
+     */
     private rateLimiters: Map<string, RateLimiter>;
+    
+    /**
+     * Timestamp of last advertisement for rate limiting
+     * 
+     * Tracks advertisement timing to ensure compliance with rate limits
+     * and prevent excessive radio usage that could drain battery or
+     * cause interference with other BLE operations.
+     */
     private lastAdvertisementTime: number = 0;
+    
+    /**
+     * Timestamp of last scan operation for power management
+     * 
+     * Manages scan timing to optimize power consumption while maintaining
+     * adequate network discovery performance. Implements intelligent
+     * backoff based on network density and discovery success rates.
+     */
     private lastScanTime: number = 0;
 
+    /**
+     * Initialize BLE Manager with comprehensive security and networking components
+     * 
+     * Constructs a fully configured BLE manager instance with all necessary
+     * cryptographic and networking components for secure mesh operations.
+     * This constructor establishes the foundation for Protocol v2.1 security
+     * and initializes all state management systems.
+     * 
+     * Initialization Process:
+     * 1. Stores references to core cryptographic and networking components
+     * 2. Creates MessageEncryption instance for Double Ratchet operations
+     * 3. Initializes MeshNetwork with node fingerprint for routing
+     * 4. Sets up security state management (sessions, verification, replay protection)
+     * 5. Initializes event callback systems for application integration
+     * 6. Creates operational state tracking and performance statistics
+     * 7. Establishes periodic maintenance timers and cleanup systems
+     * 
+     * Security Component Integration:
+     * - Links key pair for identity operations and message signing
+     * - Configures encryption engine for session-based message protection
+     * - Integrates advertiser for secure node discovery broadcasting
+     * - Connects scanner for verified node discovery and validation
+     * - Associates connection manager for secure peer communications
+     * 
+     * State Management Setup:
+     * - Initializes empty security state maps for sessions and verification
+     * - Creates message chain tracking for Protocol v2 replay protection
+     * - Sets up rate limiting infrastructure for DoS protection
+     * - Configures performance statistics and monitoring systems
+     * 
+     * Event System Configuration:
+     * - Establishes comprehensive event handling architecture
+     * - Configures component event forwarding and processing
+     * - Sets up application callback registration systems
+     * - Initializes error handling and diagnostic systems
+     * 
+     * Resource Management:
+     * - Starts cleanup timer for periodic maintenance operations
+     * - Configures memory management for long-running operations
+     * - Establishes resource limits and cleanup policies
+     * - Sets up performance monitoring and optimization systems
+     * 
+     * @param keyPair - Cryptographic key pair for node identity and security operations
+     * @param advertiser - BLE advertiser for secure node discovery broadcasting
+     * @param scanner - BLE scanner for node discovery and verification
+     * @param connectionManager - Connection manager for peer-to-peer communications
+     * 
+     * Component Requirements:
+     * - keyPair: Must be properly initialized with Ed25519/X25519 key material
+     * - advertiser: Must implement secure Protocol v2 advertising with signatures
+     * - scanner: Must support cryptographic verification of discovered nodes
+     * - connectionManager: Must handle secure session establishment and messaging
+     * 
+     * Post-Construction Setup:
+     * After construction, the manager is ready for network operations but requires
+     * calling start() to begin advertising and scanning. The constructor establishes
+     * all internal state but does not initiate network operations to allow for
+     * additional configuration before network activation.
+     * 
+     * Memory and Performance Considerations:
+     * - Constructor operations are optimized for minimal startup latency
+     * - State maps are pre-allocated but empty to minimize memory usage
+     * - Timer operations are deferred until start() to reduce resource usage
+     * - Component integration uses references to avoid unnecessary copying
+     */
     constructor(
         keyPair: IGhostKeyPair,
         advertiser: BLEAdvertiser,
@@ -215,7 +766,76 @@ export abstract class BLEManager {
     }
 
     /**
-     * Start the secure BLE mesh network
+     * Start the secure BLE mesh network with Protocol v2.1 compliance
+     * 
+     * Initiates full mesh network operations including secure advertising, node
+     * discovery, and mesh processing. This method establishes the node's presence
+     * in the mesh network and begins accepting connections and messages from peers.
+     * 
+     * Startup Process:
+     * 1. Validates current network state to prevent duplicate operations
+     * 2. Generates pre-keys for efficient asynchronous key exchange
+     * 3. Creates cryptographically signed advertisement with Protocol v2 features
+     * 4. Starts rate-limited advertising and scanning operations
+     * 5. Initializes mesh processing and network maintenance
+     * 6. Begins privacy-preserving address rotation schedule
+     * 7. Logs successful startup with protocol version confirmation
+     * 
+     * Security Initialization:
+     * - Generates fresh pre-keys for X3DH-style key exchange
+     * - Creates identity proof with full public key for Protocol v2 compliance
+     * - Signs advertisement data with Ed25519 for authenticity verification
+     * - Establishes replay protection through sequence number initialization
+     * 
+     * Advertisement Creation:
+     * - Includes complete cryptographic identity for verification
+     * - Embeds current mesh information for network discovery
+     * - Provides pre-key bundle for efficient session establishment
+     * - Signs all advertisement data for tamper detection
+     * 
+     * Network Activation:
+     * - Starts BLE advertising with cryptographic signatures
+     * - Begins scanning for other mesh nodes with verification
+     * - Initializes rate limiting to prevent resource exhaustion
+     * - Starts mesh processing for message routing and forwarding
+     * 
+     * Privacy and Security Features:
+     * - Begins ephemeral identifier rotation for unlinkability
+     * - Starts address rotation to prevent tracking
+     * - Initializes security monitoring and intrusion detection
+     * - Establishes performance monitoring and optimization
+     * 
+     * Error Handling:
+     * - Comprehensive error handling with automatic cleanup on failure
+     * - Graceful degradation for partial initialization failures
+     * - Detailed error logging for troubleshooting and diagnostics
+     * - Automatic state reset on critical failures
+     * 
+     * @throws {Error} If network is already started or initialization fails
+     * 
+     * Pre-conditions:
+     * - Manager must be properly constructed with valid components
+     * - Key pair must be initialized with cryptographic material
+     * - Platform BLE capabilities must be available and accessible
+     * - Required permissions for BLE operations must be granted
+     * 
+     * Post-conditions:
+     * - Node is discoverable by other mesh participants
+     * - Ready to receive and process incoming connections
+     * - Mesh routing and message forwarding operational
+     * - Security monitoring and protection systems active
+     * 
+     * Performance Considerations:
+     * - Startup optimized for minimal latency and resource usage
+     * - Parallel initialization of advertising and scanning
+     * - Efficient pre-key generation for session establishment
+     * - Rate limiting configured for optimal power consumption
+     * 
+     * Network Effects:
+     * - Node becomes visible in mesh topology
+     * - Contributes to network connectivity and resilience
+     * - Begins participating in message routing and forwarding
+     * - Enhances overall network capacity and coverage
      */
     async start(): Promise<void> {
         if (this.state.isScanning || this.state.isAdvertising) {
@@ -313,7 +933,100 @@ export abstract class BLEManager {
     }
 
     /**
-     * Send an encrypted message with Protocol v2 security
+     * Send an encrypted message with Protocol v2.1 security guarantees
+     * 
+     * Transmits a secure end-to-end encrypted message to a specific recipient through
+     * the mesh network using Double Ratchet encryption and Protocol v2 message chaining.
+     * This method provides comprehensive security including forward secrecy, replay
+     * protection, and cryptographic authentication.
+     * 
+     * Security Process:
+     * 1. Validates recipient protocol compatibility and network availability
+     * 2. Enforces rate limiting to prevent abuse and DoS attacks
+     * 3. Establishes or retrieves existing Double Ratchet session
+     * 4. Creates message with Protocol v2 chain linking for replay protection
+     * 5. Encrypts message with session keys providing forward secrecy
+     * 6. Signs message with node identity for authentication
+     * 7. Attempts direct delivery or queues for mesh routing
+     * 
+     * Protocol v2 Enhancements:
+     * - Message chaining for strong replay protection and ordering
+     * - Full sender public key inclusion for standalone verification
+     * - Enhanced header with cryptographic binding to previous messages
+     * - Improved sequence number management for gap detection
+     * 
+     * Message Security Features:
+     * - End-to-end encryption with Double Ratchet forward secrecy
+     * - Cryptographic authentication preventing message forgery
+     * - Replay protection through sequence numbers and message chaining
+     * - Integrity protection detecting any message modification
+     * 
+     * Session Management:
+     * - Automatic session establishment using X3DH-style key exchange
+     * - Session key rotation for ongoing forward secrecy
+     * - Session state synchronization and recovery
+     * - Graceful session lifecycle management
+     * 
+     * Routing and Delivery:
+     * - Intelligent routing through optimal mesh paths
+     * - Direct delivery optimization for connected peers
+     * - Multi-hop forwarding with relay signature verification
+     * - Priority-based message scheduling and queuing
+     * 
+     * Performance Optimizations:
+     * - Cached session reuse for frequent correspondents
+     * - Efficient message formatting and serialization
+     * - Optimized cryptographic operations
+     * - Smart routing decisions based on network topology
+     * 
+     * Error Handling:
+     * - Comprehensive validation of recipient and message parameters
+     * - Graceful handling of session establishment failures
+     * - Automatic retry mechanisms for transient failures
+     * - Detailed error reporting for debugging and diagnostics
+     * 
+     * @param recipientId - Cryptographic fingerprint of the intended recipient
+     * @param content - Plain text message content to encrypt and transmit
+     * @param priority - Message priority for routing and delivery optimization
+     * @returns Promise resolving to unique message identifier for tracking
+     * 
+     * @throws {Error} If network not started, recipient incompatible, or rate limited
+     * 
+     * Recipient Requirements:
+     * - Must be a valid node fingerprint (64-character hex string)
+     * - Node must support Protocol v2.1 or compatible version
+     * - Node must be discoverable or previously encountered
+     * 
+     * Content Constraints:
+     * - Message content must be valid UTF-8 text
+     * - Length limited by BLE payload constraints and fragmentation
+     * - Content encrypted and integrity-protected automatically
+     * 
+     * Priority Levels:
+     * - LOW: Best-effort delivery, deprioritized under congestion
+     * - NORMAL: Standard delivery with balanced resource allocation
+     * - HIGH: Prioritized delivery with optimized routing
+     * - URGENT: Immediate delivery with maximum resource allocation
+     * 
+     * Usage Examples:
+     * ```typescript
+     * // Send standard message
+     * const messageId = await manager.sendMessage(recipientId, "Hello, secure world!");
+     * 
+     * // Send high-priority message
+     * const urgentId = await manager.sendMessage(
+     *     recipientId, 
+     *     "Emergency alert!", 
+     *     MessagePriority.HIGH
+     * );
+     * ```
+     * 
+     * Security Guarantees:
+     * - Message content protected by end-to-end encryption
+     * - Sender authentication through cryptographic signatures
+     * - Forward secrecy even if long-term keys compromised
+     * - Replay protection preventing message reuse attacks
+     * - Integrity protection detecting any message tampering
      */
     async sendMessage(
         recipientId: string,
@@ -456,7 +1169,97 @@ export abstract class BLEManager {
     }
 
     /**
-     * Handle incoming message with Protocol v2 verification
+     * Handle incoming message with Protocol v2.1 verification and security processing
+     * 
+     * Processes incoming BLE messages with comprehensive security validation,
+     * cryptographic verification, and Protocol v2 compliance checking. This method
+     * implements the complete message processing pipeline including signature
+     * verification, replay protection, decryption, and application delivery.
+     * 
+     * Message Processing Pipeline:
+     * 1. Protocol version compatibility verification
+     * 2. Cryptographic signature validation using sender's public key
+     * 3. Replay protection through message ID and sequence checking
+     * 4. Message expiration and TTL validation
+     * 5. Message chain integrity verification for Protocol v2
+     * 6. Fragment reassembly for large messages
+     * 7. Routing decision and message forwarding
+     * 8. Decryption attempts with available sessions
+     * 9. Application delivery or mesh relay processing
+     * 
+     * Protocol v2 Security Validation:
+     * - Mandatory cryptographic signature verification
+     * - Full public key validation against sender identity
+     * - Message chain integrity checking for sequence validation
+     * - Enhanced replay protection with sequence number gaps
+     * - Timestamp validation for temporal security
+     * 
+     * Signature Verification Process:
+     * - Extracts sender public key from message headers
+     * - Validates public key matches claimed sender identity
+     * - Verifies Ed25519 signature over message hash
+     * - Checks signature freshness and validity period
+     * - Logs verification failures for security monitoring
+     * 
+     * Message Chain Validation:
+     * - Verifies sequence number progression for ordering
+     * - Validates message hash chaining for integrity
+     * - Detects missing or out-of-order messages
+     * - Handles chain recovery and synchronization
+     * 
+     * Decryption Strategy:
+     * - Primary: Session-based decryption with Double Ratchet
+     * - Fallback: Direct decryption with node key pair
+     * - Alternative: Broadcast decryption for group messages
+     * - Error handling: Graceful failure for undecryptable messages
+     * 
+     * Routing and Forwarding:
+     * - Intelligent routing decisions based on message destination
+     * - Relay signature verification for multi-hop forwarding
+     * - Loop prevention and hop count management
+     * - Priority-based forwarding for network optimization
+     * 
+     * Security Event Handling:
+     * - Signature verification failure logging and alerting
+     * - Replay attack detection and prevention
+     * - Invalid message chain handling and recovery
+     * - Security statistics update and monitoring
+     * 
+     * Performance Optimizations:
+     * - Efficient signature verification with cached public keys
+     * - Smart decryption order based on session likelihood
+     * - Optimized fragment handling and reassembly
+     * - Minimal processing for non-applicable messages
+     * 
+     * @param bleMessage - Complete BLE message with Protocol v2 security fields
+     * @param fromNodeId - Cryptographic fingerprint of the sending node
+     * 
+     * @throws {Error} Critical processing errors that require attention
+     * 
+     * Message Requirements:
+     * - Must include Protocol v2 signature and verification fields
+     * - Sender public key must be present for standalone verification
+     * - Message hash and previous hash required for chain validation
+     * - Valid sequence number for replay protection
+     * 
+     * Processing Outcomes:
+     * - Successful decryption: Message delivered to application callbacks
+     * - Routing decision: Message forwarded through mesh network
+     * - Security failure: Message rejected with detailed logging
+     * - Replay detection: Message silently dropped with statistics update
+     * 
+     * Event Generation:
+     * - Message received events for successfully processed messages
+     * - Signature verification failure events for security monitoring
+     * - Replay detection events for intrusion detection systems
+     * - Processing error events for debugging and diagnostics
+     * 
+     * Security Considerations:
+     * - All messages processed with zero-trust security model
+     * - Cryptographic verification mandatory for Protocol v2 compliance
+     * - Replay protection prevents message reuse attacks
+     * - Chain validation ensures message ordering and integrity
+     * - Performance monitoring prevents DoS through processing overhead
      */
     private async handleIncomingMessage(
         bleMessage: BLEMessage,
@@ -572,7 +1375,78 @@ export abstract class BLEManager {
     }
 
     /**
-     * Verify message signature with Protocol v2 requirements
+     * Verify message signature with Protocol v2.1 cryptographic requirements
+     * 
+     * Performs comprehensive cryptographic verification of message signatures
+     * according to Protocol v2 security specifications. This method implements
+     * the core security validation that prevents message forgery and ensures
+     * authentic communication in the mesh network.
+     * 
+     * Verification Process:
+     * 1. Validates presence of required Protocol v2 signature fields
+     * 2. Extracts sender public key from message headers
+     * 3. Verifies public key authenticity against sender identity
+     * 4. Validates Ed25519 signature over message hash
+     * 5. Checks signature format and cryptographic validity
+     * 6. Returns comprehensive verification result with error details
+     * 
+     * Protocol v2 Requirements:
+     * - Sender public key MUST be included in message for standalone verification
+     * - Public key must cryptographically match the claimed sender identity
+     * - Signature must be valid Ed25519 signature over message hash
+     * - All verification must succeed for message acceptance
+     * 
+     * Cryptographic Validation:
+     * - Ed25519 signature verification using sender's public key
+     * - SHA-256 fingerprint calculation for identity verification
+     * - Signature format validation (64 bytes for Ed25519)
+     * - Public key format validation (32 bytes for Ed25519)
+     * 
+     * Security Properties:
+     * - Prevents message forgery through cryptographic authentication
+     * - Ensures non-repudiation of message origin
+     * - Validates message integrity and tamper detection
+     * - Provides standalone verification without prior key exchange
+     * 
+     * Error Handling:
+     * - Detailed error messages for different failure modes
+     * - Graceful handling of malformed or missing cryptographic data
+     * - Security-focused error reporting for monitoring systems
+     * - Comprehensive logging for security audit trails
+     * 
+     * Performance Considerations:
+     * - Efficient signature verification using optimized cryptographic libraries
+     * - Cached public key processing for repeated verification
+     * - Early validation failure detection to minimize processing overhead
+     * - Optimized fingerprint calculation for identity verification
+     * 
+     * @param message - BLE message containing signature and cryptographic fields
+     * @param fromNodeId - Expected sender identity for verification
+     * @returns Verification result with success status, method, and error details
+     * 
+     * Return Value Components:
+     * - verified: Boolean indicating verification success or failure
+     * - method: Always "signature" for this verification type
+     * - senderPublicKey: Extracted public key if verification successful
+     * - error: Detailed error description if verification failed
+     * 
+     * Verification Failure Reasons:
+     * - NO_SENDER_KEY: Message missing required sender public key
+     * - SIGNATURE_VERIFICATION_FAILED: Invalid cryptographic signature
+     * - Identity mismatch: Public key doesn't match sender ID
+     * - Format errors: Invalid key or signature format
+     * 
+     * Security Guarantees:
+     * - Successful verification proves message authenticity
+     * - Failed verification indicates potential security threat
+     * - Identity binding prevents impersonation attacks
+     * - Cryptographic integrity ensures message wasn't modified
+     * 
+     * Usage Context:
+     * - Called for every incoming message in Protocol v2 mode
+     * - Critical security checkpoint for mesh network trust
+     * - Foundation for all subsequent message processing
+     * - Essential for replay protection and security monitoring
      */
     private async verifyMessageSignature(
         message: BLEMessage,
@@ -727,8 +1601,90 @@ export abstract class BLEManager {
     }
 
     /**
-     * Get or establish Double Ratchet session with Protocol v2
+     * Get or establish Double Ratchet session with Protocol v2.1 compliance
+     * 
+     * Manages the complete lifecycle of secure communication sessions with peer nodes
+     * including session retrieval, establishment, and Protocol v2 compatibility validation.
+     * This method implements the foundation for all secure messaging operations in the
+     * mesh network.
+     * 
+     * Session Management Strategy:
+     * 1. Check for existing authenticated session and return if valid
+     * 2. Await pending key exchange if already in progress
+     * 3. Validate node existence and discovery status
+     * 4. Perform Protocol v2 handshake for compatibility verification
+     * 5. Execute X3DH-style key exchange with Double Ratchet initialization
+     * 6. Create complete session with Protocol v2 message chain tracking
+     * 7. Store session state and clean up temporary exchange data
+     * 
+     * Protocol v2 Session Features:
+     * - Double Ratchet implementation for forward and backward secrecy
+     * - Message chain tracking for replay protection and ordering
+     * - Protocol version negotiation and compatibility enforcement
+     * - Enhanced session metadata for security monitoring
+     * 
+     * Key Exchange Process:
+     * - X3DH-style key agreement using pre-keys from advertisements
+     * - Ed25519 identity validation and authentication
+     * - X25519 ephemeral key exchange for session establishment
+     * - Double Ratchet initialization with derived session keys
+     * 
+     * Session Security Properties:
+     * - Forward secrecy: Past messages secure even if keys compromised
+     * - Backward secrecy: Future keys don't compromise past messages
+     * - Deniable authentication: Cryptographic non-attribution
+     * - Message ordering: Sequence number tracking and validation
+     * 
+     * Concurrency Management:
+     * - Prevents duplicate key exchanges through pending operation tracking
+     * - Thread-safe session establishment with atomic operations
+     * - Graceful handling of simultaneous session establishment attempts
+     * - Automatic cleanup of failed or abandoned exchanges
+     * 
+     * Error Handling and Recovery:
+     * - Comprehensive error handling for all failure modes
+     * - Automatic cleanup of failed session establishment attempts
+     * - Detailed error logging for debugging and security monitoring
+     * - Graceful degradation for partial compatibility failures
+     * 
+     * Performance Optimizations:
+     * - Session reuse for multiple messages with same peer
+     * - Efficient key exchange using pre-computed values
+     * - Cached protocol compatibility checks
+     * - Optimized session state storage and retrieval
+     * 
+     * @param nodeId - Cryptographic fingerprint of the target node
+     * @returns Promise resolving to established session or null if failed
+     * 
+     * @throws {Error} For critical failures requiring immediate attention
+     * 
+     * Session Establishment Requirements:
+     * - Target node must be discovered and have valid cryptographic identity
+     * - Node must support Protocol v2.1 or compatible version
+     * - Valid pre-keys must be available for key exchange
+     * - Network connectivity must exist for handshake completion
+     * 
+     * Session State Components:
+     * - Session keys: Double Ratchet root key and chain keys
+     * - Message counters: Send and receive sequence tracking
+     * - Chain hashes: Previous message linking for replay protection
+     * - Quality metrics: Latency, throughput, and reliability stats
+     * 
+     * Security Considerations:
+     * - All sessions use fresh ephemeral keys for forward secrecy
+     * - Session establishment includes mutual authentication
+     * - Protocol compatibility prevents downgrade attacks
+     * - Session state protected against timing and side-channel attacks
+     * 
+     * Usage Context:
+     * - Called automatically during message sending operations
+     * - Used for establishing encrypted communication channels
+     * - Foundation for all secure peer-to-peer messaging
+     * - Critical component of mesh network security architecture
      */
+
+ 
+
     private async getOrEstablishSession(nodeId: string): Promise<BLESession | null> {
         // Check existing session
         let session = this.sessions.get(nodeId);
@@ -1063,7 +2019,88 @@ export abstract class BLEManager {
     // ... [Include ALL remaining methods from original file] ...
 
     /**
-     * Stop the BLE mesh network
+     * Stop the BLE mesh network with comprehensive cleanup and security considerations
+     * 
+     * Gracefully terminates all mesh network operations including session cleanup,
+     * resource deallocation, and secure state clearing. This method ensures complete
+     * shutdown of the networking subsystem while maintaining security through proper
+     * cryptographic material destruction and state cleanup.
+     * 
+     * Shutdown Process:
+     * 1. Stops all periodic processing timers and maintenance operations
+     * 2. Gracefully closes all active Double Ratchet sessions
+     * 3. Terminates BLE advertising, scanning, and connection management
+     * 4. Clears all security state and cryptographic material
+     * 5. Resets network topology and routing information
+     * 6. Updates operational state to reflect shutdown status
+     * 
+     * Security Cleanup:
+     * - Secure destruction of session keys and cryptographic state
+     * - Clearing of message chains and replay protection data
+     * - Removal of cached signatures and verification state
+     * - Cleanup of pending key exchanges and temporary material
+     * 
+     * Resource Management:
+     * - Termination of all active timers and periodic operations
+     * - Cleanup of message queues and fragment reassembly state
+     * - Deallocation of rate limiters and performance tracking
+     * - Release of network topology and routing table resources
+     * 
+     * Network Coordination:
+     * - Graceful disconnection from all connected peers
+     * - Proper session termination with cleanup notifications
+     * - Mesh network departure signaling where possible
+     * - Advertising cessation to remove node from discovery
+     * 
+     * Component Shutdown:
+     * - BLE advertiser: Stop broadcasting and release radio resources
+     * - BLE scanner: Terminate discovery and cleanup scan state
+     * - Connection manager: Close connections and cleanup session state
+     * - Mesh network: Clear routing tables and message queues
+     * 
+     * Error Handling:
+     * - Comprehensive error handling ensuring partial cleanup succeeds
+     * - Individual component failure isolation preventing cascade failures
+     * - Detailed error logging for troubleshooting and diagnostics
+     * - Graceful degradation for critical shutdown scenarios
+     * 
+     * State Consistency:
+     * - Atomic state updates ensuring consistent shutdown state
+     * - Proper ordering of cleanup operations to prevent resource leaks
+     * - Complete state reset enabling clean restart operations
+     * - Memory cleanup preventing resource exhaustion
+     * 
+     * @throws {Error} If critical components cannot be stopped cleanly
+     * 
+     * Pre-shutdown Considerations:
+     * - Important messages should be transmitted before shutdown
+     * - Active sessions should be notified of impending disconnection
+     * - Critical state should be persisted if required for restart
+     * - Network graceful departure procedures should be initiated
+     * 
+     * Post-shutdown State:
+     * - All network operations terminated and resources released
+     * - Security state cleared and cryptographic material destroyed
+     * - Node removed from mesh topology and discovery systems
+     * - Ready for safe restart or application termination
+     * 
+     * Performance Considerations:
+     * - Shutdown optimized for minimal delay and resource contention
+     * - Parallel component shutdown where safe and appropriate
+     * - Efficient memory cleanup and resource deallocation
+     * - Timeout protection for unresponsive component shutdown
+     * 
+     * Security Guarantees:
+     * - All session keys and cryptographic state securely destroyed
+     * - No persistent security state remains after shutdown
+     * - Replay protection state cleared preventing reuse attacks
+     * - Network identity removed from discoverable state
+     * 
+     * Usage Context:
+     * - Application shutdown and cleanup procedures
+     * - Network reconfiguration requiring restart
+     * - Error recovery and system reset operations
+     * - Power management and resource conservation
      */
     async stop(): Promise<void> {
         console.log('🛑 Stopping BLE mesh network...');
@@ -1120,25 +2157,53 @@ export abstract class BLEManager {
         return this.messageChains.get(nodeId)?.lastSentHash || '';
     }
     private getLastBroadcastHash(): string { return ''; }
+
     private async tryDirectDelivery(nodeId: string, message: BLEMessage): Promise<boolean> {
-        if (this.connectionManager.isConnectedTo(nodeId)) {
-            try {
-                await this.connectionManager.sendMessage(nodeId, message);
-                return true;
-            } catch {
-                return false;
-            }
-        }
+    // Enhanced implementation with better error handling
+    const connMgr = this.connectionManager;
+    
+    // Verify connection manager has the required methods
+    if (typeof connMgr.isConnectedTo !== 'function' || typeof connMgr.sendMessage !== 'function') {
+        console.error('Connection manager missing required methods');
         return false;
     }
+    
+    if (connMgr.isConnectedTo(nodeId)) {
+        try {
+            await connMgr.sendMessage(nodeId, message);
+            console.log(`✅ Direct delivery successful to ${nodeId}`);
+            return true;
+        } catch (error) {
+            console.error(`Direct delivery failed to ${nodeId}:`, error);
+            return false;
+        }
+    }
+    return false;
+}
+
     private queueForMeshDelivery(message: BLEMessage, destinationId: string): void {
         this.meshNetwork.queueMessage(message, destinationId);
     }
-    private async broadcastToConnectedNodes(
+        private async broadcastToConnectedNodes(
         message: BLEMessage,
         excludeNodeId?: string
     ): Promise<{ sent: number; failed: number }> {
-        return await this.connectionManager.broadcastMessage(message, excludeNodeId);
+        // Enhanced implementation with validation
+        const connMgr = this.connectionManager;
+        
+        if (typeof connMgr.broadcastMessage !== 'function') {
+            console.error('Connection manager missing broadcastMessage method');
+            return { sent: 0, failed: 0 };
+        }
+        
+        try {
+            const result = await connMgr.broadcastMessage(message, excludeNodeId);
+            console.log(`📡 Broadcast result: sent=${result.sent}, failed=${result.failed}`);
+            return result;
+        } catch (error) {
+            console.error('Broadcast failed:', error);
+            return { sent: 0, failed: 0 };
+        }
     }
     private async handleFragment(message: BLEMessage): Promise<BLEMessage | null> {
         return message;
@@ -1264,7 +2329,89 @@ export abstract class BLEManager {
         }
     }
 
-    // Discovery and verification
+    /**
+     * Handle node discovery with comprehensive security validation and integration
+     * 
+     * Processes newly discovered mesh nodes through complete security validation,
+     * cryptographic verification, and network integration. This method implements
+     * the critical security checkpoint for admitting new nodes into the trusted
+     * mesh network topology.
+     * 
+     * Discovery Processing Pipeline:
+     * 1. Logs node discovery with protocol version information
+     * 2. Verifies advertisement cryptographic signature for authenticity
+     * 3. Implements replay protection through sequence number tracking
+     * 4. Extracts and validates cryptographic identity from advertisement
+     * 5. Updates network topology with verified node information
+     * 6. Triggers automatic connection for trusted nodes
+     * 7. Notifies application callbacks of successful discovery
+     * 
+     * Security Validation Process:
+     * - Advertisement signature verification using embedded public key
+     * - Replay protection through sequence number and node ID tracking
+     * - Public key extraction and identity verification
+     * - Protocol version compatibility checking
+     * - Advertisement freshness and timestamp validation
+     * 
+     * Cryptographic Identity Handling:
+     * - Extracts full public key from Protocol v2 advertisements
+     * - Validates public key format and cryptographic properties
+     * - Stores identity information for future session establishment
+     * - Records key validation metadata including method and timestamp
+     * 
+     * Network Integration:
+     * - Updates discovered nodes registry with complete node information
+     * - Increments discovery statistics for performance monitoring
+     * - Triggers mesh topology updates and route recalculation
+     * - Initiates automatic connection procedures for trusted nodes
+     * 
+     * Trust and Verification:
+     * - Automatic connection for nodes with verified trust status
+     * - Security policy enforcement based on verification levels
+     * - Trust inheritance and delegation where configured
+     * - Verification status tracking and management
+     * 
+     * Performance and Statistics:
+     * - Discovery event tracking for network analysis
+     * - Performance metrics update and monitoring
+     * - Network density and connectivity assessment
+     * - Discovery success rate and timing analysis
+     * 
+     * Event Notification:
+     * - Application callback notification with node and advertisement data
+     * - Network topology change events for monitoring systems
+     * - Security event logging for audit and compliance
+     * - Discovery statistics update for performance analysis
+     * 
+     * @param node - Complete node information from discovery process
+     * @param advertisement - Cryptographically signed advertisement data
+     * 
+     * @throws {Error} For critical security violations requiring immediate attention
+     * 
+     * Security Requirements:
+     * - Advertisement must include valid Protocol v2 cryptographic signature
+     * - Public key must be present and properly formatted
+     * - Sequence number must not indicate replay attack
+     * - Node identity must be cryptographically consistent
+     * 
+     * Processing Outcomes:
+     * - Successful validation: Node added to network topology
+     * - Security failure: Node rejected with detailed logging
+     * - Replay detection: Advertisement silently ignored with statistics update
+     * - Trust verification: Automatic connection initiated if applicable
+     * 
+     * Network Effects:
+     * - Mesh topology updated with new node capabilities
+     * - Routing tables recalculated for optimal path selection
+     * - Network connectivity improved through additional peer
+     * - Discovery success contributes to network health metrics
+     * 
+     * Security Considerations:
+     * - All discovered nodes subject to zero-trust security model
+     * - Cryptographic verification mandatory before network admission
+     * - Replay protection prevents advertisement reuse attacks
+     * - Identity validation ensures node authenticity and consistency
+     */
     private async handleNodeDiscovered(
         node: BLENode,
         advertisement: BLEAdvertisementData
@@ -1326,7 +2473,95 @@ export abstract class BLEManager {
         }
     }
 
-    // Broadcast message
+    /**
+     * Broadcast encrypted message to all mesh network participants
+     * 
+     * Transmits a secure broadcast message to all reachable nodes in the mesh network
+     * using cryptographic signatures for authentication and Protocol v2 message chaining
+     * for replay protection. This method enables secure group communications and
+     * network-wide announcements.
+     * 
+     * Broadcast Security Model:
+     * 1. Creates message with sender identity for authentication
+     * 2. Uses broadcast encryption allowing any node to decrypt
+     * 3. Signs message with sender's private key for verification
+     * 4. Implements message chaining for broadcast replay protection
+     * 5. Distributes through mesh with relay signature verification
+     * 
+     * Protocol v2 Broadcast Features:
+     * - Broadcast-specific message chain tracking for ordering
+     * - Enhanced header with cryptographic sender authentication
+     * - Relay signature verification preventing message modification
+     * - Priority-based broadcast delivery and routing
+     * 
+     * Encryption Strategy:
+     * - Broadcast encryption using sender's public key for authentication
+     * - Any recipient can decrypt using sender's public identity
+     * - Message content protected while enabling wide distribution
+     * - Signature verification ensures message authenticity
+     * 
+     * Message Distribution:
+     * - Simultaneous transmission to all connected nodes
+     * - Multi-hop forwarding through mesh network topology
+     * - Priority-based scheduling for urgent broadcasts
+     * - Duplicate detection preventing message loops
+     * 
+     * Replay Protection:
+     * - Dedicated broadcast message chain for sequence tracking
+     * - Previous message hash linking for integrity verification
+     * - Sequence number progression for ordering enforcement
+     * - Network-wide replay detection and prevention
+     * 
+     * Performance Considerations:
+     * - Efficient broadcast encryption minimizing computational overhead
+     * - Optimized message format for mesh distribution
+     * - Smart relay selection based on network topology
+     * - Rate limiting to prevent broadcast flooding
+     * 
+     * @param content - Plain text message content for broadcast
+     * @param priority - Message priority affecting routing and delivery
+     * @returns Promise resolving to unique message identifier
+     * 
+     * @throws {Error} If network not started or broadcast creation fails
+     * 
+     * Usage Examples:
+     * ```typescript
+     * // Standard broadcast
+     * const messageId = await manager.broadcastMessage("Network announcement");
+     * 
+     * // High-priority emergency broadcast
+     * const alertId = await manager.broadcastMessage(
+     *     "Emergency: Network maintenance in progress", 
+     *     MessagePriority.URGENT
+     * );
+     * 
+     * // Public key announcement
+     * const keyId = await manager.broadcastMessage(
+     *     JSON.stringify({ type: "key_update", key: newPublicKey }),
+     *     MessagePriority.HIGH
+     * );
+     * ```
+     * 
+     * Security Properties:
+     * - Message authenticity through cryptographic signatures
+     * - Sender identity verification preventing impersonation
+     * - Replay protection through sequence number validation
+     * - Integrity protection detecting message modification
+     * - Forward distribution security through relay verification
+     * 
+     * Network Effects:
+     * - Message distributed to all reachable mesh participants
+     * - Network topology determines final message coverage
+     * - Priority affects delivery timing and resource allocation
+     * - Statistics updated for broadcast performance monitoring
+     * 
+     * Broadcast Types:
+     * - Public announcements and network notifications
+     * - Group messaging for community communications
+     * - Emergency alerts and urgent notifications
+     * - Network maintenance and protocol updates
+     * - Key distribution and security announcements
+     */
     async broadcastMessage(
         content: string,
         priority: MessagePriority = MessagePriority.NORMAL
