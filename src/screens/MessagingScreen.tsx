@@ -11,10 +11,10 @@ import {
     Alert,
     Dimensions,
     Animated,
-    Easing,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useGhostComm, type StoredMessage } from '../context/GhostCommContext';
+import { useTheme } from '../context/ThemeContext';
 import { MessageType } from '../ble';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -27,27 +27,19 @@ const MessagingScreen: React.FC = () => {
         sendMessage,
         clearMessages,
         keyPair,
-        isScanning,
         addSystemLog,
     } = useGhostComm();
+
+    const { currentTheme } = useTheme();
 
     const [inputText, setInputText] = useState('');
     const [selectedRecipient, setSelectedRecipient] = useState<string | null>(null);
     const [messageMode, setMessageMode] = useState<'DIRECT' | 'BROADCAST'>('DIRECT');
-    const [showCursor, setShowCursor] = useState(true);
     const [alias, setAlias] = useState<string>('anonymous');
-    const [isTyping, setIsTyping] = useState(false);
-    const [showNodeSelector, setShowNodeSelector] = useState(false);
+    const [showNodePanel, setShowNodePanel] = useState(false);
 
     const flatListRef = useRef<FlatList>(null);
-
-    // Animation values
     const fadeAnim = useRef(new Animated.Value(0)).current;
-    const slideAnim = useRef(new Animated.Value(30)).current;
-    const pulseAnim = useRef(new Animated.Value(1)).current;
-    const typeIndicatorAnim = useRef(new Animated.Value(0)).current;
-    const messageSendAnim = useRef(new Animated.Value(0)).current;
-    const scanLineAnim = useRef(new Animated.Value(-2)).current;
 
     // Load user alias
     useEffect(() => {
@@ -57,86 +49,12 @@ const MessagingScreen: React.FC = () => {
         };
         loadAlias();
 
-        // Initial fade in
-        Animated.parallel([
-            Animated.timing(fadeAnim, {
-                toValue: 1,
-                duration: 500,
-                useNativeDriver: true,
-            }),
-            Animated.timing(slideAnim, {
-                toValue: 0,
-                duration: 500,
-                easing: Easing.out(Easing.cubic),
-                useNativeDriver: true,
-            }),
-        ]).start();
-    }, []);
-
-    // Cursor blink effect
-    useEffect(() => {
-        const interval = setInterval(() => {
-            setShowCursor(prev => !prev);
-        }, 500);
-        return () => clearInterval(interval);
-    }, []);
-
-    // Pulse animation for broadcast mode
-    useEffect(() => {
-        if (messageMode === 'BROADCAST') {
-            const pulse = Animated.loop(
-                Animated.sequence([
-                    Animated.timing(pulseAnim, {
-                        toValue: 1.05,
-                        duration: 1000,
-                        easing: Easing.inOut(Easing.ease),
-                        useNativeDriver: true,
-                    }),
-                    Animated.timing(pulseAnim, {
-                        toValue: 1,
-                        duration: 1000,
-                        easing: Easing.inOut(Easing.ease),
-                        useNativeDriver: true,
-                    }),
-                ])
-            );
-            pulse.start();
-            return () => pulse.stop();
-        } else {
-            pulseAnim.setValue(1);
-            return undefined;
-        }
-    }, [messageMode]);
-
-    // Typing indicator animation
-    useEffect(() => {
-        if (isTyping) {
-            Animated.timing(typeIndicatorAnim, {
-                toValue: 1,
-                duration: 200,
-                useNativeDriver: true,
-            }).start();
-        } else {
-            Animated.timing(typeIndicatorAnim, {
-                toValue: 0,
-                duration: 200,
-                useNativeDriver: true,
-            }).start();
-        }
-    }, [isTyping]);
-
-    // Scan line animation
-    useEffect(() => {
-        const scan = Animated.loop(
-            Animated.timing(scanLineAnim, {
-                toValue: SCREEN_HEIGHT,
-                duration: 5000,
-                easing: Easing.linear,
-                useNativeDriver: true,
-            })
-        );
-        scan.start();
-        return () => scan.stop();
+        // Smooth fade in
+        Animated.timing(fadeAnim, {
+            toValue: 1,
+            duration: 400,
+            useNativeDriver: true,
+        }).start();
     }, []);
 
     // Auto-scroll to bottom when new messages arrive
@@ -147,6 +65,13 @@ const MessagingScreen: React.FC = () => {
             }, 100);
         }
     }, [messages]);
+
+    // Auto-select first connected node
+    useEffect(() => {
+        if (!selectedRecipient && connectedNodes.size > 0) {
+            setSelectedRecipient(Array.from(connectedNodes.keys())[0]);
+        }
+    }, [connectedNodes]);
 
     const formatFingerprint = (fp?: string) => {
         if (!fp) return 'UNKNOWN';
@@ -159,19 +84,22 @@ const MessagingScreen: React.FC = () => {
             hour12: false,
             hour: '2-digit',
             minute: '2-digit',
-            second: '2-digit'
         });
     };
 
-    const getStatusIcon = (status: StoredMessage['status']) => {
+    const getStatusColor = (status: StoredMessage['status']) => {
         switch (status) {
-            case 'QUEUED': return { icon: '◔', color: '#FFAA00' };
-            case 'TRANSMITTING': return { icon: '◉', color: '#00AAFF' };
-            case 'SENT': return { icon: '◉', color: '#00FF00' };
-            case 'DELIVERED': return { icon: '◉◉', color: '#00FF00' };
-            case 'FAILED': return { icon: '◉', color: '#FF3333' };
-            case 'TIMEOUT': return { icon: '◉', color: '#FF6600' };
-            default: return { icon: '◯', color: '#666666' };
+            case 'SENT':
+            case 'DELIVERED':
+                return currentTheme.success;
+            case 'FAILED':
+            case 'TIMEOUT':
+                return currentTheme.error;
+            case 'QUEUED':
+            case 'TRANSMITTING':
+                return currentTheme.warning;
+            default:
+                return currentTheme.textTertiary;
         }
     };
 
@@ -179,393 +107,291 @@ const MessagingScreen: React.FC = () => {
         const message = inputText.trim();
         if (!message) return;
 
-        // Command processing
-        if (message.startsWith('/')) {
-            const command = message.substring(1).toLowerCase();
-            const parts = command.split(' ');
-
-            switch (parts[0]) {
-                case 'clear':
-                    await clearMessages();
-                    setInputText('');
-                    return;
-                case 'mode':
-                    if (parts[1] === 'direct' || parts[1] === 'broadcast') {
-                        setMessageMode(parts[1].toUpperCase() as 'DIRECT' | 'BROADCAST');
-                        addSystemLog('INFO', `Message mode: ${parts[1].toUpperCase()}`);
-                    }
-                    setInputText('');
-                    return;
-                case 'nodes':
-                    setShowNodeSelector(!showNodeSelector);
-                    setInputText('');
-                    return;
-                case 'help':
-                    addSystemLog('INFO', 'Commands: /clear, /mode [direct|broadcast], /nodes, /status');
-                    setInputText('');
-                    return;
-                case 'status':
-                    addSystemLog('INFO', `Nodes: ${connectedNodes.size} connected, ${discoveredNodes.size} discovered`);
-                    setInputText('');
-                    return;
-                default:
-                    addSystemLog('WARN', `Unknown command: ${parts[0]}`);
-                    setInputText('');
-                    return;
-            }
-        }
-
-        // Send animation
-        Animated.sequence([
-            Animated.timing(messageSendAnim, {
-                toValue: 1,
-                duration: 100,
-                useNativeDriver: true,
-            }),
-            Animated.timing(messageSendAnim, {
-                toValue: 0,
-                duration: 300,
-                useNativeDriver: true,
-            }),
-        ]).start();
-
         try {
             const type = messageMode === 'BROADCAST' ? MessageType.BROADCAST : MessageType.DIRECT;
             const recipient = messageMode === 'BROADCAST' ? undefined : selectedRecipient || undefined;
 
             if (messageMode === 'DIRECT' && !recipient && connectedNodes.size === 0) {
-                addSystemLog('ERROR', 'No connected nodes for direct message');
+                Alert.alert('No Recipients', 'No connected nodes available for direct message.');
                 return;
             }
 
-            const finalRecipient = recipient ||
-                (messageMode === 'DIRECT' && connectedNodes.size > 0
-                    ? Array.from(connectedNodes.keys())[0]
-                    : undefined);
-
-            await sendMessage(message, finalRecipient, type);
+            await sendMessage(message, recipient, type);
             setInputText('');
-            setIsTyping(false);
-
-            addSystemLog('SUCCESS',
-                messageMode === 'BROADCAST'
-                    ? 'Broadcast queued'
-                    : `Message sent to ${formatFingerprint(finalRecipient)}`
-            );
         } catch (error) {
-            addSystemLog('ERROR', 'Failed to send message');
+            Alert.alert('Send Failed', 'Failed to send message. Please try again.');
         }
     };
 
-    const renderMessage = ({ item, index }: { item: StoredMessage; index: number }) => {
+    const renderMessage = ({ item }: { item: StoredMessage }) => {
         const isOwn = !item.isIncoming;
-        const senderAlias = isOwn ? alias : 'peer';
-        const senderId = isOwn
-            ? formatFingerprint(keyPair?.getFingerprint())
-            : formatFingerprint(item.senderFingerprint);
-        const statusInfo = getStatusIcon(item.status);
+        const time = formatTime(item.timestamp);
 
         return (
-            <Animated.View
-                style={[
-                    styles.messageContainer,
-                    isOwn ? styles.ownMessageContainer : styles.otherMessageContainer,
-                    {
-                        opacity: fadeAnim,
-                        transform: [
-                            {
-                                translateX: isOwn
-                                    ? Animated.multiply(messageSendAnim, 10)
-                                    : Animated.multiply(messageSendAnim, -10)
-                            }
-                        ]
-                    }
-                ]}
-            >
-                <View style={styles.messageHeader}>
-                    <Text style={styles.messageTimestamp}>[{formatTime(item.timestamp)}]</Text>
-                    <Text style={styles.messageSender}>
-                        {senderAlias}@{senderId}
-                    </Text>
-                    {item.type === MessageType.BROADCAST && (
-                        <View style={styles.broadcastBadge}>
-                            <Text style={styles.broadcastBadgeText}>BROADCAST</Text>
-                        </View>
+            <View style={[
+                styles.messageWrapper,
+                isOwn ? styles.ownMessageWrapper : styles.otherMessageWrapper
+            ]}>
+                <View style={[
+                    styles.messageBubble,
+                    { backgroundColor: isOwn ? currentTheme.primary : currentTheme.surface },
+                    isOwn ? styles.ownBubble : styles.otherBubble
+                ]}>
+                    {!isOwn && (
+                        <Text style={[styles.senderName, { color: currentTheme.textSecondary }]}>
+                            {formatFingerprint(item.senderFingerprint)}
+                        </Text>
                     )}
-                </View>
-
-                <View style={[styles.messageBubble, isOwn ? styles.ownBubble : styles.otherBubble]}>
-                    <Text style={[styles.messageText, isOwn && styles.ownMessageText]}>
+                    
+                    <Text style={[
+                        styles.messageText,
+                        { color: isOwn ? currentTheme.surface : currentTheme.text }
+                    ]}>
                         {item.content}
                     </Text>
-                </View>
 
-                {isOwn && (
                     <View style={styles.messageFooter}>
-                        <Text style={[styles.statusIcon, { color: statusInfo.color }]}>
-                            {statusInfo.icon}
+                        <Text style={[
+                            styles.messageTime,
+                            { color: isOwn ? currentTheme.surface : currentTheme.textTertiary }
+                        ]}>
+                            {time}
                         </Text>
-                        <Text style={[styles.messageStatus, { color: statusInfo.color }]}>
-                            {item.status}
-                        </Text>
-                    </View>
-                )}
-            </Animated.View>
-        );
-    };
-
-    const renderHeader = () => (
-        <Animated.View style={[styles.header, { transform: [{ scale: pulseAnim }] }]}>
-            <View style={styles.headerTop}>
-                <View style={styles.modeIndicator}>
-                    <Text style={styles.modeLabel}>MODE</Text>
-                    <TouchableOpacity
-                        style={[styles.modeButton, messageMode === 'BROADCAST' && styles.modeBroadcast]}
-                        onPress={() => setMessageMode(messageMode === 'DIRECT' ? 'BROADCAST' : 'DIRECT')}
-                        activeOpacity={0.7}
-                    >
-                        <Text style={styles.modeButtonText}>
-                            {messageMode === 'BROADCAST' ? '⟟ BROADCAST' : '→ DIRECT'}
-                        </Text>
-                    </TouchableOpacity>
-                </View>
-
-                <View style={styles.connectionStatus}>
-                    <View style={styles.statusItem}>
-                        <Text style={[styles.statusDot, connectedNodes.size > 0 && styles.statusDotActive]}>
-                            {connectedNodes.size > 0 ? '◉' : '○'}
-                        </Text>
-                        <Text style={styles.statusValue}>{connectedNodes.size}</Text>
-                        <Text style={styles.statusLabel}>CONNECTED</Text>
-                    </View>
-                    <View style={styles.statusDivider} />
-                    <View style={styles.statusItem}>
-                        <Text style={[styles.statusDot, discoveredNodes.size > 0 && styles.statusDotActive]}>
-                            {discoveredNodes.size > 0 ? '◉' : '○'}
-                        </Text>
-                        <Text style={styles.statusValue}>{discoveredNodes.size}</Text>
-                        <Text style={styles.statusLabel}>DISCOVERED</Text>
+                        
+                        {item.type === MessageType.BROADCAST && (
+                            <Text style={[
+                                styles.broadcastIndicator,
+                                { color: isOwn ? currentTheme.surface : currentTheme.textTertiary }
+                            ]}>
+                                • BROADCAST
+                            </Text>
+                        )}
+                        
+                        {isOwn && (
+                            <Text style={[
+                                styles.statusIndicator,
+                                { color: getStatusColor(item.status) }
+                            ]}>
+                                • {item.status}
+                            </Text>
+                        )}
                     </View>
                 </View>
             </View>
-
-            {messageMode === 'DIRECT' && (
-                <TouchableOpacity
-                    style={styles.recipientBar}
-                    onPress={() => setShowNodeSelector(!showNodeSelector)}
-                    activeOpacity={0.7}
-                >
-                    <Text style={styles.recipientLabel}>RECIPIENT</Text>
-                    <Text style={styles.recipientValue}>
-                        {selectedRecipient
-                            ? `◈ ${formatFingerprint(selectedRecipient)}`
-                            : connectedNodes.size > 0
-                                ? `◈ ${formatFingerprint(Array.from(connectedNodes.keys())[0])} [AUTO]`
-                                : '○ NO NODES'}
-                    </Text>
-                    <Text style={styles.recipientArrow}>▼</Text>
-                </TouchableOpacity>
-            )}
-
-            {showNodeSelector && (
-                <View style={styles.nodeSelector}>
-                    {Array.from(discoveredNodes.keys()).map((nodeId) => (
-                        <TouchableOpacity
-                            key={nodeId}
-                            style={[
-                                styles.nodeOption,
-                                selectedRecipient === nodeId && styles.nodeOptionSelected,
-                                connectedNodes.has(nodeId) && styles.nodeOptionConnected,
-                            ]}
-                            onPress={() => {
-                                setSelectedRecipient(nodeId);
-                                setShowNodeSelector(false);
-                            }}
-                        >
-                            <Text style={styles.nodeOptionText}>
-                                {connectedNodes.has(nodeId) ? '◉' : '○'} {formatFingerprint(nodeId)}
-                            </Text>
-                            {connectedNodes.has(nodeId) && (
-                                <Text style={styles.nodeOptionStatus}>ONLINE</Text>
-                            )}
-                        </TouchableOpacity>
-                    ))}
-                </View>
-            )}
-        </Animated.View>
-    );
+        );
+    };
 
     const renderEmptyState = () => (
         <View style={styles.emptyState}>
-            <Animated.View
-                style={[
-                    styles.emptyGraphic,
-                    {
-                        opacity: fadeAnim,
-                        transform: [{ translateY: slideAnim }]
-                    }
-                ]}
-            >
-                <Text style={styles.asciiArt}>{`
-     ╭───────────╮
-     │  GHOSTCOMM│
-     ╰─────┬─────╯
-           │
-      ╭────┴────╮
-      │ NO MSGS │
-      ╰─────────╯
-           │
-    ╭──────┴──────╮
-    │ SEND  FIRST │
-    ╰──────────────╯`}</Text>
-            </Animated.View>
-
-            <Animated.Text
-                style={[
-                    styles.emptyText,
-                    { opacity: Animated.multiply(fadeAnim, 0.8) }
-                ]}
-            >
+            <View style={[styles.emptyIconContainer, { backgroundColor: currentTheme.surface }]}>
+                <Text style={[styles.emptyIcon, { color: currentTheme.textTertiary }]}>○</Text>
+            </View>
+            <Text style={[styles.emptyTitle, { color: currentTheme.text }]}>
+                No Messages Yet
+            </Text>
+            <Text style={[styles.emptySubtitle, { color: currentTheme.textSecondary }]}>
                 {connectedNodes.size === 0
-                    ? 'SCANNING FOR NODES...'
-                    : 'READY TO TRANSMIT'}
-            </Animated.Text>
-
-            <Animated.View style={styles.emptyHints}>
-                <Text style={styles.emptyHint}>• Type message and press [TX]</Text>
-                <Text style={styles.emptyHint}>• Use /help for commands</Text>
-                <Text style={styles.emptyHint}>• Toggle broadcast with [BRC]</Text>
-            </Animated.View>
+                    ? 'Waiting for nodes to connect...'
+                    : 'Send a message to start the conversation'}
+            </Text>
         </View>
     );
 
+    const renderNodeOption = (nodeId: string) => {
+        const isConnected = connectedNodes.has(nodeId);
+        const isSelected = selectedRecipient === nodeId;
+
+        return (
+            <TouchableOpacity
+                key={nodeId}
+                style={[
+                    styles.nodeOption,
+                    { 
+                        backgroundColor: isSelected ? currentTheme.primary : currentTheme.surface,
+                        borderColor: currentTheme.border
+                    }
+                ]}
+                onPress={() => {
+                    setSelectedRecipient(nodeId);
+                    setShowNodePanel(false);
+                }}
+                activeOpacity={0.8}
+            >
+                <View style={styles.nodeInfo}>
+                    <Text style={[
+                        styles.nodeId,
+                        { color: isSelected ? currentTheme.surface : currentTheme.text }
+                    ]}>
+                        {formatFingerprint(nodeId)}
+                    </Text>
+                    <Text style={[
+                        styles.nodeStatus,
+                        { color: isSelected ? currentTheme.surface : (isConnected ? currentTheme.success : currentTheme.textTertiary) }
+                    ]}>
+                        {isConnected ? 'CONNECTED' : 'DISCOVERED'}
+                    </Text>
+                </View>
+                {isConnected && (
+                    <View style={[styles.connectedDot, { backgroundColor: currentTheme.success }]} />
+                )}
+            </TouchableOpacity>
+        );
+    };
+
     return (
         <KeyboardAvoidingView
-            style={styles.container}
+            style={[styles.container, { backgroundColor: currentTheme.background }]}
             behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
             keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
         >
-            {renderHeader()}
-
-            <FlatList
-                ref={flatListRef}
-                data={messages}
-                keyExtractor={(item) => item.id}
-                renderItem={renderMessage}
-                contentContainerStyle={styles.messagesList}
-                ListEmptyComponent={renderEmptyState}
-                inverted={false}
-                showsVerticalScrollIndicator={false}
-            />
-
-            {/* Input Section */}
-            <View style={styles.inputSection}>
-                <Animated.View
-                    style={[
-                        styles.typingIndicator,
-                        {
-                            opacity: typeIndicatorAnim,
-                            transform: [{ scale: typeIndicatorAnim }]
-                        }
-                    ]}
-                >
-                    <Text style={styles.typingText}>COMPOSING...</Text>
-                </Animated.View>
-
-                <View style={styles.inputContainer}>
-                    <View style={styles.inputWrapper}>
-                        <Text style={styles.inputPrefix}>
-                            {messageMode === 'BROADCAST' ? '⟟' : '→'}
+            <Animated.View style={[styles.mainContainer, { opacity: fadeAnim }]}>
+                {/* Clean Header */}
+                <View style={[styles.header, { backgroundColor: currentTheme.surface }]}>
+                    <View style={styles.headerTop}>
+                        <Text style={[styles.headerTitle, { color: currentTheme.text }]}>
+                            MESSAGES
                         </Text>
-                        <TextInput
-                            style={styles.textInput}
-                            value={inputText}
-                            onChangeText={(text) => {
-                                setInputText(text);
-                                setIsTyping(text.length > 0);
-                            }}
-                            placeholder="Enter message or /command"
-                            placeholderTextColor="#003300"
-                            onSubmitEditing={handleSend}
-                            returnKeyType="send"
-                            autoCapitalize="none"
-                            autoCorrect={false}
-                            maxLength={256}
-                        />
-                        <Text style={styles.cursor}>
-                            {showCursor && inputText.length === 0 ? '▊' : ''}
-                        </Text>
+                        <View style={styles.connectionIndicator}>
+                            <View style={[
+                                styles.connectionDot,
+                                { backgroundColor: connectedNodes.size > 0 ? currentTheme.success : currentTheme.textTertiary }
+                            ]} />
+                            <Text style={[styles.connectionText, { color: currentTheme.textSecondary }]}>
+                                {connectedNodes.size} / {discoveredNodes.size}
+                            </Text>
+                        </View>
                     </View>
 
-                    <TouchableOpacity
-                        style={[
-                            styles.sendButton,
-                            !inputText.trim() && styles.sendButtonDisabled,
-                            inputText.trim() ? styles.sendButtonActive : null
-                        ]}
-                        onPress={handleSend}
-                        disabled={!inputText.trim()}
-                        activeOpacity={0.7}
-                    >
-                        <Text style={styles.sendButtonText}>TX</Text>
-                    </TouchableOpacity>
+                    {/* Mode and Recipient Bar */}
+                    <View style={styles.controlBar}>
+                        {/* Mode Toggle */}
+                        <TouchableOpacity
+                            style={[
+                                styles.modeToggle,
+                                { 
+                                    backgroundColor: messageMode === 'BROADCAST' ? currentTheme.primary : 'transparent',
+                                    borderColor: currentTheme.border
+                                }
+                            ]}
+                            onPress={() => setMessageMode(messageMode === 'DIRECT' ? 'BROADCAST' : 'DIRECT')}
+                            activeOpacity={0.8}
+                        >
+                            <Text style={[
+                                styles.modeText,
+                                { color: messageMode === 'BROADCAST' ? currentTheme.surface : currentTheme.text }
+                            ]}>
+                                {messageMode}
+                            </Text>
+                        </TouchableOpacity>
+
+                        {/* Recipient Selector (for Direct mode) */}
+                        {messageMode === 'DIRECT' && (
+                            <TouchableOpacity
+                                style={[styles.recipientSelector, { borderColor: currentTheme.border }]}
+                                onPress={() => setShowNodePanel(!showNodePanel)}
+                                activeOpacity={0.8}
+                            >
+                                <Text style={[styles.recipientLabel, { color: currentTheme.textSecondary }]}>
+                                    TO:
+                                </Text>
+                                <Text style={[styles.recipientValue, { color: currentTheme.text }]}>
+                                    {selectedRecipient 
+                                        ? formatFingerprint(selectedRecipient)
+                                        : 'SELECT NODE'}
+                                </Text>
+                                <Text style={[styles.dropdownArrow, { color: currentTheme.textSecondary }]}>
+                                    ▼
+                                </Text>
+                            </TouchableOpacity>
+                        )}
+
+                        {/* Broadcast indicator */}
+                        {messageMode === 'BROADCAST' && (
+                            <View style={styles.broadcastInfo}>
+                                <Text style={[styles.broadcastLabel, { color: currentTheme.textSecondary }]}>
+                                    Broadcasting to all {discoveredNodes.size} discovered nodes
+                                </Text>
+                            </View>
+                        )}
+                    </View>
                 </View>
 
-                {/* Enhanced Command Bar */}
-                <View style={styles.commandBar}>
-                    <TouchableOpacity
-                        style={[styles.commandButton, messageMode === 'BROADCAST' && styles.commandButtonActive]}
-                        onPress={() => setMessageMode(messageMode === 'DIRECT' ? 'BROADCAST' : 'DIRECT')}
-                        activeOpacity={0.7}
-                    >
-                        <Text style={styles.commandButtonText}>BRC</Text>
-                    </TouchableOpacity>
+                {/* Node Selection Panel */}
+                {showNodePanel && (
+                    <View style={[styles.nodePanel, { backgroundColor: currentTheme.surface }]}>
+                        <Text style={[styles.nodePanelTitle, { color: currentTheme.text }]}>
+                            SELECT RECIPIENT
+                        </Text>
+                        <View style={styles.nodeList}>
+                            {Array.from(discoveredNodes.keys()).map(renderNodeOption)}
+                        </View>
+                    </View>
+                )}
 
-                    <TouchableOpacity
-                        style={styles.commandButton}
-                        onPress={() => setShowNodeSelector(!showNodeSelector)}
-                        activeOpacity={0.7}
-                    >
-                        <Text style={styles.commandButtonText}>NODE</Text>
-                    </TouchableOpacity>
+                {/* Messages List */}
+                <FlatList
+                    ref={flatListRef}
+                    data={messages}
+                    keyExtractor={(item) => item.id}
+                    renderItem={renderMessage}
+                    contentContainerStyle={styles.messagesList}
+                    ListEmptyComponent={renderEmptyState}
+                    showsVerticalScrollIndicator={false}
+                />
 
-                    <TouchableOpacity
-                        style={styles.commandButton}
-                        onPress={clearMessages}
-                        activeOpacity={0.7}
-                    >
-                        <Text style={styles.commandButtonText}>CLR</Text>
-                    </TouchableOpacity>
+                {/* Clean Input Area */}
+                <View style={[styles.inputArea, { backgroundColor: currentTheme.surface }]}>
+                    <View style={[styles.inputContainer, { borderColor: currentTheme.border }]}>
+                        <TextInput
+                            style={[styles.textInput, { color: currentTheme.text }]}
+                            value={inputText}
+                            onChangeText={setInputText}
+                            placeholder="Type a message..."
+                            placeholderTextColor={currentTheme.textTertiary}
+                            onSubmitEditing={handleSend}
+                            returnKeyType="send"
+                            multiline
+                            maxLength={256}
+                        />
+                        
+                        <TouchableOpacity
+                            style={[
+                                styles.sendButton,
+                                { 
+                                    backgroundColor: inputText.trim() ? currentTheme.primary : currentTheme.surface,
+                                    borderColor: currentTheme.border
+                                }
+                            ]}
+                            onPress={handleSend}
+                            disabled={!inputText.trim()}
+                            activeOpacity={0.8}
+                        >
+                            <Text style={[
+                                styles.sendButtonText,
+                                { color: inputText.trim() ? currentTheme.surface : currentTheme.textTertiary }
+                            ]}>
+                                →
+                            </Text>
+                        </TouchableOpacity>
+                    </View>
 
-                    <TouchableOpacity
-                        style={styles.commandButton}
-                        onPress={() => setInputText('/help')}
-                        activeOpacity={0.7}
-                    >
-                        <Text style={styles.commandButtonText}>?</Text>
-                    </TouchableOpacity>
-
-                    <View style={styles.charCounter}>
-                        <Text style={[
-                            styles.charCountText,
-                            inputText.length > 200 && styles.charCountWarning
-                        ]}>
+                    {/* Quick Actions */}
+                    <View style={styles.quickActions}>
+                        <TouchableOpacity
+                            style={[styles.quickAction, { borderColor: currentTheme.border }]}
+                            onPress={clearMessages}
+                        >
+                            <Text style={[styles.quickActionText, { color: currentTheme.textSecondary }]}>
+                                CLEAR
+                            </Text>
+                        </TouchableOpacity>
+                        
+                        <Text style={[styles.charCounter, { color: currentTheme.textTertiary }]}>
                             {inputText.length}/256
                         </Text>
                     </View>
                 </View>
-            </View>
-
-            {/* Scan line effect */}
-            <Animated.View
-                pointerEvents="none"
-                style={[
-                    styles.scanLine,
-                    {
-                        transform: [{ translateY: scanLineAnim }],
-                    },
-                ]}
-            />
+            </Animated.View>
         </KeyboardAvoidingView>
     );
 };
@@ -573,422 +399,306 @@ const MessagingScreen: React.FC = () => {
 const styles = StyleSheet.create({
     container: {
         flex: 1,
-        backgroundColor: '#000000',
+    },
+    mainContainer: {
+        flex: 1,
     },
 
-    // Header Styles
+    // Header
     header: {
-        backgroundColor: '#0A0A0A',
-        borderBottomWidth: 1,
-        borderBottomColor: '#00FF00',
+        paddingTop: 15,
+        paddingHorizontal: 20,
+        paddingBottom: 10,
+        elevation: 2,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
     },
     headerTop: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        padding: 12,
+        marginBottom: 15,
     },
-    modeIndicator: {
+    headerTitle: {
+        fontSize: 16,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
+        letterSpacing: 3,
+    },
+    connectionIndicator: {
         flexDirection: 'row',
         alignItems: 'center',
     },
-    modeLabel: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
-        opacity: 0.6,
-        marginRight: 10,
-        letterSpacing: 1,
+    connectionDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+        marginRight: 8,
     },
-    modeButton: {
-        paddingHorizontal: 12,
-        paddingVertical: 6,
-        borderWidth: 1,
-        borderColor: '#00FF00',
-        backgroundColor: 'transparent',
-    },
-    modeBroadcast: {
-        backgroundColor: '#001100',
-        borderColor: '#00FF00',
-    },
-    modeButtonText: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 11,
-        fontWeight: 'bold',
-        letterSpacing: 1,
-    },
-    connectionStatus: {
-        flexDirection: 'row',
-        alignItems: 'center',
-    },
-    statusItem: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        paddingHorizontal: 10,
-    },
-    statusDot: {
-        color: '#003300',
+    connectionText: {
         fontSize: 12,
-        marginRight: 5,
-    },
-    statusDotActive: {
-        color: '#00FF00',
-        textShadowColor: '#00FF00',
-        textShadowRadius: 3,
-    },
-    statusValue: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 14,
-        fontWeight: 'bold',
-        marginRight: 5,
-    },
-    statusLabel: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 9,
-        opacity: 0.6,
-        letterSpacing: 1,
-    },
-    statusDivider: {
-        width: 1,
-        height: 20,
-        backgroundColor: '#00FF00',
-        opacity: 0.3,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
     },
 
-    // Recipient Bar
-    recipientBar: {
+    // Control Bar
+    controlBar: {
         flexDirection: 'row',
         alignItems: 'center',
-        paddingVertical: 10,
+    },
+    modeToggle: {
+        paddingVertical: 8,
+        paddingHorizontal: 16,
+        borderWidth: 1,
+        marginRight: 12,
+    },
+    modeText: {
+        fontSize: 11,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        letterSpacing: 1.5,
+    },
+    recipientSelector: {
+        flex: 1,
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingVertical: 8,
         paddingHorizontal: 12,
-        backgroundColor: '#001100',
-        borderTopWidth: 1,
-        borderTopColor: '#00FF00',
-        opacity: 0.9,
+        borderWidth: 1,
     },
     recipientLabel: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
-        opacity: 0.6,
-        marginRight: 10,
-        letterSpacing: 1,
+        fontSize: 11,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
+        marginRight: 8,
     },
     recipientValue: {
         flex: 1,
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
         fontSize: 12,
-        fontWeight: 'bold',
+        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+        fontWeight: '500',
     },
-    recipientArrow: {
-        color: '#00FF00',
-        fontSize: 12,
-        opacity: 0.6,
+    dropdownArrow: {
+        fontSize: 10,
+    },
+    broadcastInfo: {
+        flex: 1,
+    },
+    broadcastLabel: {
+        fontSize: 11,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
+        fontStyle: 'italic',
     },
 
-    // Node Selector
-    nodeSelector: {
-        backgroundColor: '#0A0A0A',
-        borderTopWidth: 1,
-        borderTopColor: '#00FF00',
-        maxHeight: 150,
+    // Node Panel
+    nodePanel: {
+        maxHeight: 200,
+        borderBottomWidth: 1,
+        borderBottomColor: 'rgba(0,0,0,0.1)',
+    },
+    nodePanelTitle: {
+        fontSize: 12,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        letterSpacing: 2,
+        padding: 15,
+    },
+    nodeList: {
+        paddingHorizontal: 15,
+        paddingBottom: 15,
     },
     nodeOption: {
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
-        paddingVertical: 10,
+        paddingVertical: 12,
         paddingHorizontal: 15,
-        borderBottomWidth: 1,
-        borderBottomColor: '#001100',
+        marginBottom: 8,
+        borderWidth: 1,
     },
-    nodeOptionSelected: {
-        backgroundColor: '#001100',
+    nodeInfo: {
+        flex: 1,
     },
-    nodeOptionConnected: {
-        borderLeftWidth: 3,
-        borderLeftColor: '#00FF00',
-    },
-    nodeOptionText: {
-        color: '#00FF00',
+    nodeId: {
+        fontSize: 13,
         fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 12,
+        fontWeight: '500',
+        marginBottom: 3,
     },
-    nodeOptionStatus: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    nodeStatus: {
         fontSize: 10,
-        opacity: 0.6,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
         letterSpacing: 1,
+    },
+    connectedDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
     },
 
     // Messages List
     messagesList: {
-        padding: 15,
+        padding: 20,
         flexGrow: 1,
     },
-    messageContainer: {
-        marginBottom: 20,
+    messageWrapper: {
+        marginBottom: 12,
     },
-    ownMessageContainer: {
+    ownMessageWrapper: {
         alignItems: 'flex-end',
     },
-    otherMessageContainer: {
+    otherMessageWrapper: {
         alignItems: 'flex-start',
-    },
-    messageHeader: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginBottom: 5,
-        paddingHorizontal: 5,
-    },
-    messageTimestamp: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 9,
-        opacity: 0.5,
-        marginRight: 8,
-    },
-    messageSender: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 10,
-        fontWeight: 'bold',
-        opacity: 0.7,
-    },
-    broadcastBadge: {
-        marginLeft: 8,
-        paddingHorizontal: 6,
-        paddingVertical: 2,
-        backgroundColor: '#001100',
-        borderWidth: 1,
-        borderColor: '#00FF00',
-    },
-    broadcastBadgeText: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 8,
-        letterSpacing: 1,
     },
     messageBubble: {
         maxWidth: SCREEN_WIDTH * 0.75,
-        paddingVertical: 10,
-        paddingHorizontal: 15,
-        borderWidth: 1,
+        paddingVertical: 12,
+        paddingHorizontal: 16,
     },
     ownBubble: {
-        backgroundColor: '#001100',
-        borderColor: '#00FF00',
-        borderTopRightRadius: 0,
+        borderTopRightRadius: 4,
+        borderTopLeftRadius: 20,
+        borderBottomLeftRadius: 20,
+        borderBottomRightRadius: 20,
     },
     otherBubble: {
-        backgroundColor: '#0A0A0A',
-        borderColor: '#00FF00',
-        borderTopLeftRadius: 0,
-        borderStyle: 'dashed',
+        borderTopLeftRadius: 4,
+        borderTopRightRadius: 20,
+        borderBottomLeftRadius: 20,
+        borderBottomRightRadius: 20,
+    },
+    senderName: {
+        fontSize: 11,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        marginBottom: 5,
+        letterSpacing: 0.5,
     },
     messageText: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 12,
-        lineHeight: 18,
-    },
-    ownMessageText: {
-        color: '#00FF00',
+        fontSize: 14,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
+        lineHeight: 20,
     },
     messageFooter: {
         flexDirection: 'row',
         alignItems: 'center',
         marginTop: 5,
-        paddingHorizontal: 5,
     },
-    statusIcon: {
+    messageTime: {
         fontSize: 10,
-        marginRight: 5,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
     },
-    messageStatus: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 9,
-        opacity: 0.7,
-        letterSpacing: 1,
+    broadcastIndicator: {
+        fontSize: 10,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
+        marginLeft: 6,
+    },
+    statusIndicator: {
+        fontSize: 10,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
+        marginLeft: 6,
     },
 
     // Empty State
     emptyState: {
         flex: 1,
-        justifyContent: 'center',
         alignItems: 'center',
-        paddingVertical: 50,
+        justifyContent: 'center',
+        paddingVertical: 60,
     },
-    emptyGraphic: {
-        marginBottom: 30,
-    },
-    asciiArt: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
-        lineHeight: 14,
-        opacity: 0.3,
-        textAlign: 'center',
-    },
-    emptyText: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 14,
-        fontWeight: 'bold',
-        letterSpacing: 2,
+    emptyIconContainer: {
+        width: 80,
+        height: 80,
+        borderRadius: 40,
+        alignItems: 'center',
+        justifyContent: 'center',
         marginBottom: 20,
     },
-    emptyHints: {
-        alignItems: 'flex-start',
+    emptyIcon: {
+        fontSize: 40,
     },
-    emptyHint: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 11,
-        opacity: 0.5,
-        marginVertical: 3,
+    emptyTitle: {
+        fontSize: 16,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
+        marginBottom: 8,
+    },
+    emptySubtitle: {
+        fontSize: 13,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
     },
 
-    // Input Section
-    inputSection: {
-        backgroundColor: '#0A0A0A',
-        borderTopWidth: 1,
-        borderTopColor: '#00FF00',
-    },
-    typingIndicator: {
-        position: 'absolute',
-        top: -20,
-        left: 15,
-        backgroundColor: '#000000',
-        paddingHorizontal: 8,
-        paddingVertical: 2,
-        borderWidth: 1,
-        borderColor: '#00FF00',
-        zIndex: 1,
-    },
-    typingText: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 9,
-        letterSpacing: 1,
-        opacity: 0.7,
+    // Input Area
+    inputArea: {
+        paddingHorizontal: 20,
+        paddingTop: 15,
+        paddingBottom: 15,
+        elevation: 8,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: -2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
     },
     inputContainer: {
         flexDirection: 'row',
-        padding: 12,
-        alignItems: 'center',
-    },
-    inputWrapper: {
-        flex: 1,
-        flexDirection: 'row',
-        alignItems: 'center',
-        backgroundColor: '#000000',
+        alignItems: 'flex-end',
         borderWidth: 1,
-        borderColor: '#00FF00',
-        paddingHorizontal: 12,
-        marginRight: 10,
-        height: 40,
-    },
-    inputPrefix: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 14,
-        marginRight: 8,
-        fontWeight: 'bold',
+        minHeight: 44,
+        maxHeight: 100,
     },
     textInput: {
         flex: 1,
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 12,
-        padding: 0,
-    },
-    cursor: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 12,
+        fontSize: 14,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
+        paddingVertical: 10,
+        paddingHorizontal: 15,
+        maxHeight: 80,
     },
     sendButton: {
-        width: 50,
-        height: 40,
-        justifyContent: 'center',
+        width: 44,
+        height: 44,
         alignItems: 'center',
-        borderWidth: 2,
-        borderColor: '#00FF00',
-        backgroundColor: 'transparent',
-    },
-    sendButtonDisabled: {
-        opacity: 0.3,
-        borderStyle: 'dashed',
-    },
-    sendButtonActive: {
-        backgroundColor: '#00FF00',
+        justifyContent: 'center',
+        borderLeftWidth: 1,
     },
     sendButtonText: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 14,
-        fontWeight: 'bold',
-        letterSpacing: 1,
+        fontSize: 20,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
     },
 
-    // Command Bar
-    commandBar: {
+    // Quick Actions
+    quickActions: {
         flexDirection: 'row',
-        paddingHorizontal: 12,
-        paddingBottom: 8,
         alignItems: 'center',
-        borderTopWidth: 1,
-        borderTopColor: '#001100',
+        justifyContent: 'space-between',
+        marginTop: 10,
     },
-    commandButton: {
-        paddingHorizontal: 12,
+    quickAction: {
         paddingVertical: 6,
-        marginRight: 8,
+        paddingHorizontal: 12,
         borderWidth: 1,
-        borderColor: '#00FF00',
-        backgroundColor: 'transparent',
-        opacity: 0.7,
     },
-    commandButtonActive: {
-        backgroundColor: '#001100',
-        opacity: 1,
-    },
-    commandButtonText: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
+    quickActionText: {
         fontSize: 10,
-        fontWeight: 'bold',
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
         letterSpacing: 1,
     },
     charCounter: {
-        marginLeft: 'auto',
-        paddingHorizontal: 10,
-    },
-    charCountText: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
         fontSize: 10,
-        opacity: 0.5,
-    },
-    charCountWarning: {
-        color: '#FFAA00',
-        opacity: 0.8,
-    },
-
-    // Effects
-    scanLine: {
-        position: 'absolute',
-        left: 0,
-        right: 0,
-        height: 1,
-        backgroundColor: '#00FF00',
-        opacity: 0.05,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
     },
 });
 

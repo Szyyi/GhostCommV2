@@ -150,7 +150,7 @@ export interface BLEAdvertisementData {
  */
 export interface IdentityProof {
     publicKeyHash: string;           // Hash of identity public key
-    publicKey: string;               // Full hex-encoded Ed25519 public key (v2)
+    publicKey?: string;              // Full hex-encoded Ed25519 public key (v2)
     timestamp: number;               // Proof timestamp
     nonce: string;                   // Random nonce
     signature: string;               // Ed25519 signature
@@ -494,6 +494,113 @@ export interface MessageVerificationContext {
     signature: Uint8Array;           // Message signature
     previousMessageHash?: string;    // For chain verification
     sequenceNumber?: number;         // For sequence verification
+}
+
+// ===== SCANNING TYPES (WITH REACT NATIVE EXTENSIONS) =====
+
+/**
+ * Scan filter configuration for intelligent node discovery optimization
+ */
+export interface ScanFilter {
+    /** Filter by specific BLE service UUID for targeted discovery */
+    serviceUUID?: string;
+    
+    /** Minimum signal strength in dBm (-30 to -100 range) */
+    minRssi?: number;
+    
+    /** Maximum estimated distance in meters for proximity filtering */
+    maxDistance?: number;
+    
+    /** Required node capabilities for service-specific discovery */
+    capabilities?: NodeCapability[];
+    
+    /** Only include cryptographically verified nodes */
+    verifiedOnly?: boolean;
+    
+    /** Only include nodes with established trust relationships */
+    trustedOnly?: boolean;
+    
+    /** Minimum required protocol version for compatibility */
+    minProtocolVersion?: number;
+}
+
+/**
+ * Comprehensive scan configuration for optimized discovery performance
+ * Extended with React Native platform-specific options
+ */
+export interface ScanConfig {
+    // ===== CORE CONFIGURATION =====
+    /** Scan interval in milliseconds (time between scan starts) */
+    interval: number;
+    
+    /** Scan window in milliseconds (active scanning duration) */
+    window: number;
+    
+    /** Whether to report duplicate advertisements from same device */
+    duplicates: boolean;
+    
+    /** Active scanning (scan requests) vs passive scanning (listen only) */
+    activeScan: boolean;
+    
+    /** Array of scan filters for targeted discovery */
+    filters?: ScanFilter[];
+    
+    /** Require Protocol v2 compliance for discovered nodes */
+    requireProtocolV2?: boolean;
+
+    // ===== REACT NATIVE PLATFORM EXTENSIONS =====
+    /** Filter by GhostComm service UUID (React Native specific) */
+    filterByService?: boolean;
+    
+    /** Enable low power scanning mode (Android/iOS optimization) */
+    lowPower?: boolean;
+    
+    /** Enable aggressive scanning mode for faster discovery */
+    aggressive?: boolean;
+    
+    /** Stop scanning after finding one device */
+    singleDevice?: boolean;
+    
+    /** Batch scan results for efficiency (Android) */
+    batchResults?: boolean;
+    
+    /** Enable duty cycle scanning for battery optimization (Android) */
+    dutyCycle?: boolean;
+}
+
+/**
+ * Scan result with Protocol v2.1 security metadata
+ */
+export interface ScanResult {
+    /** Platform-specific device identifier for tracking and correlation */
+    deviceId: string;
+    
+    /** Complete advertisement data with Protocol v2 security fields */
+    advertisementData: BLEAdvertisementData;
+    
+    /** Received Signal Strength Indicator in dBm (-30 to -100 typical range) */
+    rssi: number;
+    
+    /** Advertised transmission power in dBm for distance calculation */
+    txPower?: number;
+    
+    /** Estimated distance in meters based on signal propagation model */
+    distance?: number;
+    
+    /** Discovery timestamp for freshness assessment and aging */
+    timestamp: number;
+    
+    /** Raw BLE advertisement packet data for advanced analysis */
+    rawData?: Uint8Array;
+    
+    /** Protocol v2 signature verification status */
+    isVerified: boolean;
+    
+    /** Detailed verification failure reason for debugging */
+    verificationError?: string;
+    
+    /** Detected protocol version for compatibility assessment */
+    protocolVersion: number;
 }
 
 // ===== CONFIGURATION =====

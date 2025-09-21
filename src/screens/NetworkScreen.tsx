@@ -9,25 +9,19 @@ import {
     Platform,
     Dimensions,
     Animated,
-    Easing,
 } from 'react-native';
 import { useGhostComm } from '../context/GhostCommContext';
 import { useTheme } from '../context/ThemeContext';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-// Enhanced node type with mesh routing info
 interface MeshNode {
     id: string;
     rssi: number;
     lastSeen: number;
     alias?: string;
-    routingTable?: Map<string, string>; // destination -> nextHop
     messageCount?: number;
-    bytesTransferred?: number;
-    hopCount?: number; // hops from our node
-    discoveredBy?: string; // which node told us about this one
-    canSee?: string[]; // nodes this node can directly see
+    hopCount?: number;
 }
 
 const NetworkScreen: React.FC = () => {
@@ -48,126 +42,59 @@ const NetworkScreen: React.FC = () => {
         disconnectFromNode,
         startAdvertising,
         stopAdvertising,
-        getNodeRoutingTable,
-        getMessageFlow,
     } = useGhostComm();
 
     const [refreshing, setRefreshing] = useState(false);
     const [selectedNode, setSelectedNode] = useState<string | null>(null);
-    const [viewMode, setViewMode] = useState<'mesh' | 'nodes' | 'stats' | 'logs'>('mesh');
-    const [autoScroll, setAutoScroll] = useState(true);
-    const scrollViewRef = useRef<ScrollView>(null);
+    const [viewMode, setViewMode] = useState<'radar' | 'grid' | 'stats'>('radar');
 
     // Animation values
     const fadeAnim = useRef(new Animated.Value(0)).current;
-    const slideAnim = useRef(new Animated.Value(30)).current;
+    const radarSweep = useRef(new Animated.Value(0)).current;
     const pulseAnim = useRef(new Animated.Value(1)).current;
-    const scanPulse = useRef(new Animated.Value(1)).current;
     const nodeAnimations = useRef<Map<string, Animated.Value>>(new Map()).current;
-    const connectionAnimations = useRef<Map<string, Animated.Value>>(new Map()).current;
 
-    // Calculate mesh topology
-    const meshTopology = useMemo(() => {
-        const topology = new Map<string, Set<string>>();
-        const routingPaths = new Map<string, Map<string, string[]>>();
-
-        discoveredNodes.forEach((node) => {
-            if (node.canSee) {
-                topology.set(node.id, new Set(node.canSee));
-            }
-        });
-
-        const calculatePath = (from: string, to: string): string[] => {
-            if (from === to) return [from];
-
-            const visited = new Set<string>();
-            const queue: { node: string, path: string[] }[] = [{ node: from, path: [from] }];
-
-            while (queue.length > 0) {
-                const { node, path } = queue.shift()!;
-
-                if (visited.has(node)) continue;
-                visited.add(node);
-
-                const neighbors = topology.get(node) || new Set();
-                for (const neighbor of neighbors) {
-                    const newPath = [...path, neighbor];
-                    if (neighbor === to) {
-                        return newPath;
-                    }
-                    queue.push({ node: neighbor, path: newPath });
-                }
-            }
-
-            return [];
-        };
-
-        const ourId = keyPair?.getFingerprint() || 'self';
-        const paths = new Map<string, string[]>();
-
-        discoveredNodes.forEach((node) => {
-            const path = calculatePath(ourId, node.id);
-            if (path.length > 0) {
-                paths.set(node.id, path);
-            }
-        });
-
-        return { topology, paths };
-    }, [discoveredNodes, keyPair]);
-
-    const [messageFlows, setMessageFlows] = useState<Map<string, Map<string, number>>>(new Map());
-
+    // Initialize animations
     useEffect(() => {
-        const interval = setInterval(() => {
-            if (getMessageFlow) {
-                const flows = getMessageFlow();
-                setMessageFlows(flows);
-            }
-        }, 1000);
+        Animated.timing(fadeAnim, {
+            toValue: 1,
+            duration: 600,
+            useNativeDriver: true,
+        }).start();
 
-        return () => clearInterval(interval);
-    }, [getMessageFlow]);
-
-    // Initial animations
-    useEffect(() => {
-        Animated.parallel([
-            Animated.timing(fadeAnim, {
-                toValue: 1,
-                duration: 500,
-                useNativeDriver: true,
-            }),
-            Animated.timing(slideAnim, {
-                toValue: 0,
-                duration: 500,
-                easing: Easing.out(Easing.cubic),
-                useNativeDriver: true,
-            }),
-        ]).start();
-    }, []);
-
-    // Scanning pulse
-    useEffect(() => {
+        // Radar sweep animation
         if (isScanning) {
-            const pulse = Animated.loop(
+            Animated.loop(
+                Animated.timing(radarSweep, {
+                    toValue: 1,
+                    duration: 3000,
+                    useNativeDriver: true,
+                })
+            ).start();
+        } else {
+            radarSweep.setValue(0);
+        }
+    }, [isScanning]);
+
+    // Pulse animation for connected nodes
+    useEffect(() => {
+        if (connectedNodes.size > 0) {
+            Animated.loop(
                 Animated.sequence([
-                    Animated.timing(scanPulse, {
-                        toValue: 1.3,
-                        duration: 1000,
-                        easing: Easing.inOut(Easing.ease),
+                    Animated.timing(pulseAnim, {
+                        toValue: 1.1,
+                        duration: 1500,
                         useNativeDriver: true,
                     }),
-                    Animated.timing(scanPulse, {
+                    Animated.timing(pulseAnim, {
                         toValue: 1,
-                        duration: 1000,
-                        easing: Easing.inOut(Easing.ease),
+                        duration: 1500,
                         useNativeDriver: true,
                     }),
                 ])
-            );
-            pulse.start();
-            return () => pulse.stop();
+            ).start();
         }
-    }, [isScanning]);
+    }, [connectedNodes.size]);
 
     const handleRefresh = async () => {
         setRefreshing(true);
@@ -179,371 +106,254 @@ const NetworkScreen: React.FC = () => {
         return fp.substring(0, 8).toUpperCase();
     };
 
-    const getSignalStrength = (rssi: number) => {
-        // Use theme-aware colors for signal strength
-        const excellentColor = currentTheme.primary;
-        const goodColor = currentTheme.primary + 'DD';
-        const fairColor = currentTheme.primary + 'AA';
-        const weakColor = currentTheme.primary + '88';
-        const poorColor = currentTheme.primary + '66';
-        const lostColor = currentTheme.primary + '44';
-
-        if (rssi >= -50) return { bars: 5, level: 'EXCELLENT', color: excellentColor };
-        if (rssi >= -60) return { bars: 4, level: 'GOOD', color: goodColor };
-        if (rssi >= -70) return { bars: 3, level: 'FAIR', color: fairColor };
-        if (rssi >= -80) return { bars: 2, level: 'WEAK', color: weakColor };
-        if (rssi >= -90) return { bars: 1, level: 'POOR', color: poorColor };
-        return { bars: 0, level: 'LOST', color: lostColor };
+    const getSignalQuality = (rssi: number) => {
+        if (rssi >= -50) return { level: 5, label: 'EXCELLENT', opacity: 1 };
+        if (rssi >= -60) return { level: 4, label: 'STRONG', opacity: 0.85 };
+        if (rssi >= -70) return { level: 3, label: 'GOOD', opacity: 0.7 };
+        if (rssi >= -80) return { level: 2, label: 'FAIR', opacity: 0.55 };
+        if (rssi >= -90) return { level: 1, label: 'WEAK', opacity: 0.4 };
+        return { level: 0, label: 'LOST', opacity: 0.25 };
     };
 
-    const getSignalBars = (strength: number) => {
-        const filled = '█';
-        const empty = '░';
-        return filled.repeat(strength) + empty.repeat(5 - strength);
-    };
-
-    const toggleBeacon = () => {
-        if (isAdvertising) {
-            stopAdvertising?.();
-        } else {
-            startAdvertising?.();
-        }
-    };
-
-    const renderMeshView = () => {
+    const renderRadarView = () => {
         const nodes = Array.from(discoveredNodes.values());
-        const ourId = keyPair?.getFingerprint() || 'self';
+        const RADAR_SIZE = SCREEN_WIDTH - 40;
+        const CENTER = RADAR_SIZE / 2;
 
         return (
-            <Animated.View
-                style={[
-                    styles.meshContainer,
-                    {
-                        opacity: fadeAnim,
-                        transform: [{ translateY: slideAnim }]
+            <View style={styles.radarContainer}>
+                {/* Radar Display */}
+                <View style={[
+                    styles.radarDisplay,
+                    { 
+                        width: RADAR_SIZE,
+                        height: RADAR_SIZE,
+                        backgroundColor: currentTheme.surface
                     }
-                ]}
-            >
-                <View style={[styles.meshVisualization, {
-                    backgroundColor: currentTheme.surface,
-                    borderColor: currentTheme.primary
-                }]}>
-                    <Text style={[styles.meshTitle, { color: currentTheme.primary }]}>
-                        MESH TOPOLOGY
-                    </Text>
+                ]}>
+                    {/* Radar Rings */}
+                    {[1, 2, 3, 4].map((ring) => (
+                        <View
+                            key={ring}
+                            style={[
+                                styles.radarRing,
+                                {
+                                    width: (RADAR_SIZE / 4) * ring,
+                                    height: (RADAR_SIZE / 4) * ring,
+                                    borderColor: currentTheme.border,
+                                    opacity: 0.3 - (ring * 0.05)
+                                }
+                            ]}
+                        />
+                    ))}
 
-                    <View style={styles.meshCenter}>
+                    {/* Radar Sweep */}
+                    {isScanning && (
                         <Animated.View
                             style={[
-                                styles.centralNode,
-                                { transform: [{ scale: pulseAnim }] }
+                                styles.radarSweep,
+                                {
+                                    backgroundColor: currentTheme.primary,
+                                    transform: [
+                                        { rotate: radarSweep.interpolate({
+                                            inputRange: [0, 1],
+                                            outputRange: ['0deg', '360deg']
+                                        })}
+                                    ]
+                                }
                             ]}
-                        >
-                            <View style={[styles.centralNodeInner, {
-                                backgroundColor: currentTheme.surface,
-                                borderColor: currentTheme.primary
-                            }]}>
-                                <Text style={[styles.centralNodeIcon, { color: currentTheme.primary }]}>◈</Text>
-                                <Text style={[styles.centralNodeLabel, { color: currentTheme.primary }]}>YOU</Text>
-                            </View>
-                        </Animated.View>
+                        />
+                    )}
 
-                        <View style={styles.meshGrid}>
-                            {nodes.slice(0, 8).map((node, index) => {
-                                const isConnected = connectedNodes.has(node.id);
-                                const nodeAnim = nodeAnimations.get(node.id) || new Animated.Value(1);
-                                const signal = getSignalStrength(node.rssi ?? -100);
-                                const angle = (index * 45) * Math.PI / 180;
-                                const radius = 100;
-                                const x = Math.cos(angle) * radius;
-                                const y = Math.sin(angle) * radius;
+                    {/* Center Node (You) */}
+                    <Animated.View
+                        style={[
+                            styles.centerNode,
+                            { 
+                                backgroundColor: currentTheme.primary,
+                                transform: [{ scale: pulseAnim }]
+                            }
+                        ]}
+                    >
+                        <View style={[styles.centerNodeInner, { backgroundColor: currentTheme.surface }]}>
+                            <Text style={[styles.centerNodeText, { color: currentTheme.primary }]}>YOU</Text>
+                        </View>
+                    </Animated.View>
 
-                                return (
-                                    <Animated.View
-                                        key={node.id}
+                    {/* Discovered Nodes */}
+                    {nodes.map((node, index) => {
+                        const angle = (index / nodes.length) * 2 * Math.PI;
+                        const signal = getSignalQuality(node.rssi || -100);
+                        const distance = (5 - signal.level) * 30 + 60;
+                        const x = CENTER + Math.cos(angle) * distance - 25;
+                        const y = CENTER + Math.sin(angle) * distance - 25;
+                        const isConnected = connectedNodes.has(node.id);
+
+                        return (
+                            <View key={node.id}>
+                                {/* Connection Line */}
+                                {isConnected && (
+                                    <View
                                         style={[
-                                            styles.meshNode,
+                                            styles.connectionBeam,
                                             {
+                                                backgroundColor: currentTheme.primary,
+                                                opacity: signal.opacity * 0.3,
+                                                width: distance,
                                                 transform: [
-                                                    { translateX: x },
-                                                    { translateY: y },
-                                                    { scale: nodeAnim }
+                                                    { translateX: CENTER },
+                                                    { translateY: CENTER },
+                                                    { rotate: `${angle}rad` },
+                                                    { translateX: -distance / 2 }
                                                 ]
                                             }
                                         ]}
-                                    >
-                                        {isConnected && (
-                                            <View
-                                                style={[
-                                                    styles.connectionLine,
-                                                    {
-                                                        backgroundColor: currentTheme.primary,
-                                                        width: radius,
-                                                        transform: [
-                                                            { rotate: `${angle}rad` },
-                                                            { translateX: -radius / 2 }
-                                                        ]
-                                                    }
-                                                ]}
-                                            />
-                                        )}
+                                    />
+                                )}
 
-                                        <TouchableOpacity
-                                            style={[
-                                                styles.nodeButton,
-                                                {
-                                                    backgroundColor: currentTheme.background,
-                                                    borderColor: currentTheme.primary
-                                                },
-                                                isConnected && {
-                                                    backgroundColor: currentTheme.surface,
-                                                    borderWidth: 2
-                                                },
-                                                selectedNode === node.id && {
-                                                    backgroundColor: currentTheme.surface,
-                                                    shadowColor: currentTheme.primary
-                                                }
-                                            ]}
-                                            onPress={() => setSelectedNode(selectedNode === node.id ? null : node.id)}
-                                            activeOpacity={0.7}
-                                        >
-                                            <Text style={[styles.nodeIcon, { color: signal.color }]}>
-                                                {isConnected ? '◉' : '◯'}
-                                            </Text>
-                                            <Text style={[styles.nodeIdShort, { color: currentTheme.primary }]}>
-                                                {formatFingerprint(node.id).substring(0, 4)}
-                                            </Text>
-                                            <Text style={[styles.nodeSignalBars, { color: signal.color }]}>
-                                                {getSignalBars(signal.bars)}
-                                            </Text>
-                                        </TouchableOpacity>
-                                    </Animated.View>
-                                );
-                            })}
-                        </View>
-
-                        {nodes.length > 8 && (
-                            <View style={[styles.moreNodesIndicator, {
-                                backgroundColor: currentTheme.surface,
-                                borderColor: currentTheme.primary
-                            }]}>
-                                <Text style={[styles.moreNodesText, { color: currentTheme.primary }]}>
-                                    +{nodes.length - 8} MORE
-                                </Text>
+                                {/* Node */}
+                                <TouchableOpacity
+                                    style={[
+                                        styles.radarNode,
+                                        {
+                                            left: x,
+                                            top: y,
+                                            backgroundColor: currentTheme.surface,
+                                            borderColor: isConnected ? currentTheme.primary : currentTheme.border,
+                                            borderWidth: isConnected ? 2 : 1,
+                                            opacity: signal.opacity
+                                        }
+                                    ]}
+                                    onPress={() => setSelectedNode(selectedNode === node.id ? null : node.id)}
+                                    activeOpacity={0.8}
+                                >
+                                    <View style={[
+                                        styles.radarNodeDot,
+                                        { backgroundColor: isConnected ? currentTheme.primary : currentTheme.textSecondary }
+                                    ]} />
+                                    <Text style={[styles.radarNodeId, { color: currentTheme.text }]}>
+                                        {formatFingerprint(node.id).substring(0, 4)}
+                                    </Text>
+                                </TouchableOpacity>
                             </View>
-                        )}
-                    </View>
+                        );
+                    })}
 
-                    {nodes.length === 0 && (
-                        <View style={styles.emptyMesh}>
-                            <Text style={[styles.emptyMeshIcon, { color: currentTheme.primary }]}>◎</Text>
-                            <Text style={[styles.emptyMeshText, { color: currentTheme.primary }]}>
-                                NO NODES DETECTED
-                            </Text>
-                            <Text style={[styles.emptyMeshSubtext, { color: currentTheme.textSecondary }]}>
-                                {isScanning ? 'SCANNING...' : 'START SCAN TO DISCOVER'}
-                            </Text>
-                        </View>
-                    )}
+                    {/* Distance Labels */}
+                    <Text style={[styles.distanceLabel, styles.distanceLabelTop, { color: currentTheme.textTertiary }]}>
+                        FAR
+                    </Text>
+                    <Text style={[styles.distanceLabel, styles.distanceLabelBottom, { color: currentTheme.textTertiary }]}>
+                        FAR
+                    </Text>
+                    <Text style={[styles.distanceLabel, styles.distanceLabelLeft, { color: currentTheme.textTertiary }]}>
+                        FAR
+                    </Text>
+                    <Text style={[styles.distanceLabel, styles.distanceLabelRight, { color: currentTheme.textTertiary }]}>
+                        FAR
+                    </Text>
                 </View>
 
-                <View style={[styles.quickStats, {
-                    backgroundColor: currentTheme.surface,
-                    borderColor: currentTheme.primary
-                }]}>
-                    <View style={styles.quickStatItem}>
-                        <Text style={[styles.quickStatValue, { color: currentTheme.primary }]}>
-                            {connectedNodes.size}
-                        </Text>
-                        <Text style={[styles.quickStatLabel, { color: currentTheme.textSecondary }]}>
-                            LINKED
-                        </Text>
-                    </View>
-                    <View style={[styles.quickStatDivider, { backgroundColor: currentTheme.border }]} />
-                    <View style={styles.quickStatItem}>
-                        <Text style={[styles.quickStatValue, { color: currentTheme.primary }]}>
-                            {discoveredNodes.size}
-                        </Text>
-                        <Text style={[styles.quickStatLabel, { color: currentTheme.textSecondary }]}>
-                            VISIBLE
-                        </Text>
-                    </View>
-                    <View style={[styles.quickStatDivider, { backgroundColor: currentTheme.border }]} />
-                    <View style={styles.quickStatItem}>
-                        <Text style={[styles.quickStatValue, { color: currentTheme.primary }]}>
-                            {Math.max(...Array.from(discoveredNodes.values()).map(n => (n as MeshNode).hopCount || 0), 0)}
-                        </Text>
-                        <Text style={[styles.quickStatLabel, { color: currentTheme.textSecondary }]}>
-                            MAX HOPS
-                        </Text>
-                    </View>
-                    <View style={[styles.quickStatDivider, { backgroundColor: currentTheme.border }]} />
-                    <View style={styles.quickStatItem}>
-                        <Text style={[styles.quickStatValue, { color: currentTheme.primary }]}>
-                            {networkStats.messagesRelayed}
-                        </Text>
-                        <Text style={[styles.quickStatLabel, { color: currentTheme.textSecondary }]}>
-                            RELAYED
-                        </Text>
+                {/* Signal Legend */}
+                <View style={[styles.signalLegend, { backgroundColor: currentTheme.surface }]}>
+                    <Text style={[styles.legendTitle, { color: currentTheme.text }]}>SIGNAL STRENGTH</Text>
+                    <View style={styles.legendItems}>
+                        {['EXCELLENT', 'STRONG', 'GOOD', 'FAIR', 'WEAK'].map((level, index) => (
+                            <View key={level} style={styles.legendItem}>
+                                <View style={[
+                                    styles.legendDot,
+                                    { 
+                                        backgroundColor: currentTheme.primary,
+                                        opacity: 1 - (index * 0.15)
+                                    }
+                                ]} />
+                                <Text style={[styles.legendText, { color: currentTheme.textSecondary }]}>
+                                    {level}
+                                </Text>
+                            </View>
+                        ))}
                     </View>
                 </View>
-
-                {selectedNode && (
-                    <Animated.View style={[styles.nodeDetailCard, {
-                        backgroundColor: currentTheme.surface,
-                        borderColor: currentTheme.primary
-                    }]}>
-                        <View style={styles.nodeDetailHeader}>
-                            <Text style={[styles.nodeDetailTitle, { color: currentTheme.primary }]}>
-                                NODE {formatFingerprint(selectedNode)}
-                            </Text>
-                            <TouchableOpacity
-                                onPress={() => setSelectedNode(null)}
-                                style={styles.nodeDetailClose}
-                            >
-                                <Text style={[styles.nodeDetailCloseText, { color: currentTheme.textSecondary }]}>✕</Text>
-                            </TouchableOpacity>
-                        </View>
-
-                        <View style={styles.nodeDetailContent}>
-                            <View style={styles.nodeDetailRow}>
-                                <Text style={[styles.nodeDetailLabel, { color: currentTheme.textSecondary }]}>STATUS</Text>
-                                <Text style={[styles.nodeDetailValue, { color: currentTheme.text }]}>
-                                    {connectedNodes.has(selectedNode) ? 'CONNECTED' : 'AVAILABLE'}
-                                </Text>
-                            </View>
-                            <View style={styles.nodeDetailRow}>
-                                <Text style={[styles.nodeDetailLabel, { color: currentTheme.textSecondary }]}>SIGNAL</Text>
-                                <Text style={[styles.nodeDetailValue, { color: currentTheme.text }]}>
-                                    {discoveredNodes.get(selectedNode)?.rssi} dBm
-                                </Text>
-                            </View>
-                            <View style={styles.nodeDetailRow}>
-                                <Text style={[styles.nodeDetailLabel, { color: currentTheme.textSecondary }]}>QUALITY</Text>
-                                <Text style={[
-                                    styles.nodeDetailValue,
-                                    { color: getSignalStrength(discoveredNodes.get(selectedNode)?.rssi ?? -100).color }
-                                ]}>
-                                    {getSignalBars(getSignalStrength(discoveredNodes.get(selectedNode)?.rssi ?? -100).bars)}
-                                </Text>
-                            </View>
-                        </View>
-
-                        <TouchableOpacity
-                            style={[
-                                styles.nodeDetailAction,
-                                {
-                                    backgroundColor: currentTheme.surface,
-                                    borderColor: currentTheme.primary
-                                },
-                                connectedNodes.has(selectedNode) && {
-                                    borderColor: currentTheme.error
-                                }
-                            ]}
-                            onPress={() => {
-                                if (connectedNodes.has(selectedNode)) {
-                                    disconnectFromNode(selectedNode);
-                                } else {
-                                    connectToNode(selectedNode);
-                                }
-                                setSelectedNode(null);
-                            }}
-                            activeOpacity={0.7}
-                        >
-                            <Text style={[styles.nodeDetailActionText, {
-                                color: connectedNodes.has(selectedNode) ? currentTheme.error : currentTheme.primary
-                            }]}>
-                                {connectedNodes.has(selectedNode) ? 'DISCONNECT' : 'CONNECT'}
-                            </Text>
-                        </TouchableOpacity>
-                    </Animated.View>
-                )}
-            </Animated.View>
+            </View>
         );
     };
 
-    const renderNodesView = () => {
-        const allNodes = Array.from(discoveredNodes.values());
+    const renderGridView = () => {
+        const nodes = Array.from(discoveredNodes.values());
 
         return (
-            <ScrollView style={styles.nodesContainer} showsVerticalScrollIndicator={false}>
-                <View style={styles.nodesHeader}>
-                    <Text style={[styles.nodesTitle, { color: currentTheme.primary }]}>
-                        DISCOVERED NODES
+            <ScrollView style={styles.gridContainer} showsVerticalScrollIndicator={false}>
+                <View style={styles.gridHeader}>
+                    <Text style={[styles.gridTitle, { color: currentTheme.text }]}>
+                        NETWORK NODES
                     </Text>
-                    <Text style={[styles.nodesCount, { color: currentTheme.textSecondary }]}>
-                        [{allNodes.length}]
-                    </Text>
+                    <View style={[styles.gridCount, { backgroundColor: currentTheme.primary }]}>
+                        <Text style={[styles.gridCountText, { color: currentTheme.surface }]}>
+                            {nodes.length}
+                        </Text>
+                    </View>
                 </View>
 
-                {allNodes.length === 0 ? (
-                    <View style={styles.emptyNodes}>
-                        <Text style={[styles.emptyNodesIcon, { color: currentTheme.textSecondary }]}>◎ ◎ ◎</Text>
-                        <Text style={[styles.emptyNodesText, { color: currentTheme.textSecondary }]}>
-                            NO NODES IN RANGE
+                {nodes.length === 0 ? (
+                    <View style={styles.emptyGrid}>
+                        <View style={[styles.emptyIcon, { backgroundColor: currentTheme.surface }]}>
+                            <Text style={[styles.emptyIconText, { color: currentTheme.textTertiary }]}>○</Text>
+                        </View>
+                        <Text style={[styles.emptyTitle, { color: currentTheme.text }]}>
+                            No Nodes Found
                         </Text>
-                        <TouchableOpacity
-                            style={[styles.emptyScanButton, { borderColor: currentTheme.primary }]}
-                            onPress={startScanning}
-                            activeOpacity={0.7}
-                        >
-                            <Text style={[styles.emptyScanButtonText, { color: currentTheme.primary }]}>
-                                START SCAN
-                            </Text>
-                        </TouchableOpacity>
+                        <Text style={[styles.emptySubtitle, { color: currentTheme.textSecondary }]}>
+                            Start scanning to discover nearby devices
+                        </Text>
                     </View>
                 ) : (
-                    <View style={styles.nodesList}>
-                        {allNodes.map((node) => {
-                            const meshNode = node as MeshNode;
+                    <View style={styles.nodeGrid}>
+                        {nodes.map((node) => {
                             const isConnected = connectedNodes.has(node.id);
-                            const signal = getSignalStrength(node.rssi ?? -100);
+                            const signal = getSignalQuality(node.rssi || -100);
 
                             return (
                                 <TouchableOpacity
                                     key={node.id}
                                     style={[
-                                        styles.nodeListItem,
-                                        {
+                                        styles.gridNode,
+                                        { 
                                             backgroundColor: currentTheme.surface,
-                                            borderColor: currentTheme.primary
-                                        },
-                                        isConnected && {
-                                            backgroundColor: currentTheme.surface,
-                                            borderWidth: 2
+                                            borderColor: isConnected ? currentTheme.primary : currentTheme.border
                                         }
                                     ]}
                                     onPress={() => setSelectedNode(node.id)}
-                                    activeOpacity={0.7}
+                                    activeOpacity={0.8}
                                 >
-                                    <View style={styles.nodeListLeft}>
-                                        <Text style={[
-                                            styles.nodeListIcon,
-                                            { color: currentTheme.primary },
-                                            isConnected && styles.nodeListIconConnected
-                                        ]}>
-                                            {isConnected ? '◉' : '◯'}
-                                        </Text>
-                                        <View style={styles.nodeListInfo}>
-                                            <Text style={[styles.nodeListId, { color: currentTheme.text }]}>
-                                                {formatFingerprint(node.id)}
-                                            </Text>
-                                            {meshNode.alias && (
-                                                <Text style={[styles.nodeListAlias, { color: currentTheme.textSecondary }]}>
-                                                    {meshNode.alias}
-                                                </Text>
-                                            )}
-                                        </View>
+                                    <View style={[
+                                        styles.gridNodeStatus,
+                                        { backgroundColor: isConnected ? currentTheme.primary : currentTheme.textTertiary }
+                                    ]} />
+                                    
+                                    <Text style={[styles.gridNodeId, { color: currentTheme.text }]}>
+                                        {formatFingerprint(node.id)}
+                                    </Text>
+                                    
+                                    <View style={styles.gridNodeSignal}>
+                                        {[...Array(5)].map((_, i) => (
+                                            <View
+                                                key={i}
+                                                style={[
+                                                    styles.signalBar,
+                                                    { 
+                                                        backgroundColor: i < signal.level 
+                                                            ? currentTheme.primary 
+                                                            : currentTheme.border,
+                                                        height: 4 + (i * 2)
+                                                    }
+                                                ]}
+                                            />
+                                        ))}
                                     </View>
-
-                                    <View style={styles.nodeListRight}>
-                                        <Text style={[styles.nodeListSignal, { color: signal.color }]}>
-                                            {getSignalBars(signal.bars)}
-                                        </Text>
-                                        <Text style={[styles.nodeListRssi, { color: currentTheme.textSecondary }]}>
-                                            {node.rssi} dBm
-                                        </Text>
-                                    </View>
+                                    
+                                    <Text style={[styles.gridNodeLabel, { color: currentTheme.textSecondary }]}>
+                                        {signal.label}
+                                    </Text>
                                 </TouchableOpacity>
                             );
                         })}
@@ -554,289 +364,261 @@ const NetworkScreen: React.FC = () => {
     };
 
     const renderStatsView = () => {
+        const stats = [
+            { label: 'CONNECTED', value: connectedNodes.size, icon: '◉' },
+            { label: 'DISCOVERED', value: discoveredNodes.size, icon: '◎' },
+            { label: 'MESSAGES SENT', value: networkStats.messagesSent, icon: '↑' },
+            { label: 'MESSAGES RECEIVED', value: networkStats.messagesReceived, icon: '↓' },
+            { label: 'RELAYED', value: networkStats.messagesRelayed, icon: '⟲' },
+            { label: 'DATA TRANSFERRED', value: `${((networkStats.bytesTransmitted + networkStats.bytesReceived) / 1024).toFixed(1)}KB`, icon: '⇅' },
+        ];
+
         return (
             <ScrollView style={styles.statsContainer} showsVerticalScrollIndicator={false}>
-                <Text style={[styles.statsTitle, { color: currentTheme.primary }]}>
+                <Text style={[styles.statsTitle, { color: currentTheme.text }]}>
                     NETWORK STATISTICS
                 </Text>
 
                 <View style={styles.statsGrid}>
-                    {[
-                        { icon: '◈', value: connectedNodes.size, label: 'ACTIVE LINKS' },
-                        { icon: '◎', value: discoveredNodes.size, label: 'DISCOVERED' },
-                        { icon: '⟲', value: networkStats.messagesRelayed, label: 'RELAYED' },
-                        { icon: '↑', value: `${(networkStats.bytesTransmitted / 1024).toFixed(1)}K`, label: 'SENT' },
-                        { icon: '↓', value: `${(networkStats.bytesReceived / 1024).toFixed(1)}K`, label: 'RECEIVED' },
-                        { icon: '⇅', value: `${((networkStats.bytesTransmitted + networkStats.bytesReceived) / 1024).toFixed(1)}K`, label: 'TOTAL' },
-                    ].map((stat, index) => (
-                        <View key={index} style={[styles.statCard, {
-                            backgroundColor: currentTheme.surface,
-                            borderColor: currentTheme.primary
-                        }]}>
-                            <Text style={[styles.statCardIcon, { color: currentTheme.primary }]}>
+                    {stats.map((stat, index) => (
+                        <View
+                            key={index}
+                            style={[
+                                styles.statCard,
+                                { backgroundColor: currentTheme.surface }
+                            ]}
+                        >
+                            <Text style={[styles.statIcon, { color: currentTheme.primary }]}>
                                 {stat.icon}
                             </Text>
-                            <Text style={[styles.statCardValue, { color: currentTheme.text }]}>
+                            <Text style={[styles.statValue, { color: currentTheme.text }]}>
                                 {stat.value}
                             </Text>
-                            <Text style={[styles.statCardLabel, { color: currentTheme.textSecondary }]}>
+                            <Text style={[styles.statLabel, { color: currentTheme.textSecondary }]}>
                                 {stat.label}
                             </Text>
                         </View>
                     ))}
                 </View>
 
-                <View style={[styles.routingSection, {
-                    backgroundColor: currentTheme.surface,
-                    borderColor: currentTheme.primary
-                }]}>
-                    <Text style={[styles.routingSectionTitle, { color: currentTheme.primary }]}>
-                        ROUTING PATHS
+                {/* Activity Graph Placeholder */}
+                <View style={[styles.activityGraph, { backgroundColor: currentTheme.surface }]}>
+                    <Text style={[styles.graphTitle, { color: currentTheme.text }]}>
+                        NETWORK ACTIVITY
                     </Text>
-                    {Array.from(meshTopology.paths?.entries() || []).slice(0, 5).map(([nodeId, path]) => (
-                        <View key={nodeId} style={styles.routingPath}>
-                            <Text style={[styles.routingPathLabel, { color: currentTheme.textSecondary }]}>
-                                TO {formatFingerprint(nodeId).substring(0, 4)}
-                            </Text>
-                            <Text style={[styles.routingPathValue, { color: currentTheme.text }]}>
-                                {path.map(id =>
-                                    id === keyPair?.getFingerprint() ? 'YOU' : formatFingerprint(id).substring(0, 4)
-                                ).join(' → ')}
-                            </Text>
-                        </View>
-                    ))}
+                    <View style={styles.graphBars}>
+                        {[40, 65, 35, 80, 55, 70, 45].map((height, index) => (
+                            <View
+                                key={index}
+                                style={[
+                                    styles.graphBar,
+                                    { 
+                                        backgroundColor: currentTheme.primary,
+                                        height: `${height}%`,
+                                        opacity: 0.3 + (height / 100) * 0.7
+                                    }
+                                ]}
+                            />
+                        ))}
+                    </View>
                 </View>
             </ScrollView>
         );
     };
 
-    const renderLogsView = () => {
-        return (
-            <View style={styles.logsContainer}>
-                <View style={styles.logsHeader}>
-                    <Text style={[styles.logsTitle, { color: currentTheme.primary }]}>
-                        SYSTEM LOGS
-                    </Text>
-                    <TouchableOpacity
-                        onPress={() => setAutoScroll(!autoScroll)}
-                        style={[
-                            styles.logsAutoScroll,
-                            { borderColor: currentTheme.primary },
-                            autoScroll && { backgroundColor: currentTheme.surface }
-                        ]}
-                        activeOpacity={0.7}
-                    >
-                        <Text style={[styles.logsAutoScrollText, { color: currentTheme.primary }]}>
-                            AUTO
-                        </Text>
-                    </TouchableOpacity>
-                </View>
-
-                <ScrollView
-                    ref={scrollViewRef}
-                    style={[styles.logsContent, {
-                        backgroundColor: currentTheme.surface,
-                        borderColor: currentTheme.primary
-                    }]}
-                    showsVerticalScrollIndicator={false}
-                >
-                    {systemLogs.map(log => (
-                        <View key={log.id} style={styles.logEntry}>
-                            <Text style={[styles.logTime, { color: currentTheme.textSecondary }]}>
-                                [{new Date(log.timestamp).toLocaleTimeString('en-US', {
-                                    hour12: false,
-                                    hour: '2-digit',
-                                    minute: '2-digit',
-                                    second: '2-digit'
-                                })}]
-                            </Text>
-                            <Text style={[
-                                styles.logMessage,
-                                { color: currentTheme.text },
-                                log.level === 'ERROR' && { color: currentTheme.error },
-                                log.level === 'WARN' && { color: currentTheme.warning },
-                                log.level === 'SUCCESS' && { color: currentTheme.primary },
-                            ]}>
-                                {log.level === 'ERROR' ? '✗' :
-                                    log.level === 'WARN' ? '⚠' :
-                                        log.level === 'SUCCESS' ? '✓' : '▶'} {log.message}
-                            </Text>
-                        </View>
-                    ))}
-                    <View style={[styles.logEnd, { borderTopColor: currentTheme.border }]}>
-                        <Text style={[styles.logEndText, { color: currentTheme.textSecondary }]}>
-                            ━━━ END OF LOG ━━━
-                        </Text>
-                    </View>
-                </ScrollView>
-            </View>
-        );
-    };
-
     return (
         <View style={[styles.container, { backgroundColor: currentTheme.background }]}>
-            <View style={[styles.statusBar, {
-                backgroundColor: currentTheme.surface,
-                borderBottomColor: currentTheme.primary
-            }]}>
-                <View style={styles.statusSection}>
-                    <Animated.View
-                        style={[
-                            styles.statusIndicator,
-                            isScanning && { shadowColor: currentTheme.primary },
-                            { transform: [{ scale: isScanning ? scanPulse : 1 }] }
-                        ]}
-                    >
-                        <Text style={[styles.statusDot, { color: currentTheme.primary }]}>
-                            {isScanning ? '◉' : '○'}
+            <Animated.View style={[styles.mainContainer, { opacity: fadeAnim }]}>
+                {/* Header */}
+                <View style={[styles.header, { backgroundColor: currentTheme.surface }]}>
+                    <View style={styles.headerTop}>
+                        <Text style={[styles.headerTitle, { color: currentTheme.text }]}>
+                            NETWORK
                         </Text>
-                    </Animated.View>
-                    <Text style={[styles.statusLabel, { color: currentTheme.textSecondary }]}>SCAN</Text>
-                </View>
+                        <View style={styles.headerStatus}>
+                            <View style={[
+                                styles.statusDot,
+                                { backgroundColor: isScanning ? currentTheme.warning : currentTheme.textTertiary }
+                            ]} />
+                            <Text style={[styles.statusText, { color: currentTheme.textSecondary }]}>
+                                {isScanning ? 'SCANNING' : 'IDLE'}
+                            </Text>
+                        </View>
+                    </View>
 
-                <View style={styles.statusSection}>
-                    <View style={[styles.statusIndicator, isAdvertising && { shadowColor: currentTheme.primary }]}>
-                        <Text style={[styles.statusDot, { color: currentTheme.primary }]}>
-                            {isAdvertising ? '◉' : '○'}
+                    <View style={styles.idBar}>
+                        <Text style={[styles.idLabel, { color: currentTheme.textSecondary }]}>NODE ID:</Text>
+                        <Text style={[styles.idValue, { color: currentTheme.text }]}>
+                            {keyPair ? formatFingerprint(keyPair.getFingerprint()) : 'UNKNOWN'}
                         </Text>
                     </View>
-                    <Text style={[styles.statusLabel, { color: currentTheme.textSecondary }]}>BEACON</Text>
                 </View>
 
-                <View style={styles.statusSection}>
-                    <Animated.View
-                        style={[
-                            styles.statusIndicator,
-                            connectedNodes.size > 0 && { shadowColor: currentTheme.primary },
-                            { transform: [{ scale: connectedNodes.size > 0 ? pulseAnim : 1 }] }
-                        ]}
-                    >
-                        <Text style={[styles.statusDot, { color: currentTheme.primary }]}>
-                            {connectedNodes.size > 0 ? '◉' : '○'}
-                        </Text>
-                    </Animated.View>
-                    <Text style={[styles.statusLabel, { color: currentTheme.textSecondary }]}>MESH</Text>
+                {/* View Toggle */}
+                <View style={[styles.viewToggle, { backgroundColor: currentTheme.surface }]}>
+                    {[
+                        { key: 'radar', label: 'RADAR', icon: '◎' },
+                        { key: 'grid', label: 'GRID', icon: '▦' },
+                        { key: 'stats', label: 'STATS', icon: '≡' }
+                    ].map((view) => (
+                        <TouchableOpacity
+                            key={view.key}
+                            style={[
+                                styles.toggleButton,
+                                viewMode === view.key && { backgroundColor: currentTheme.primary }
+                            ]}
+                            onPress={() => setViewMode(view.key as any)}
+                            activeOpacity={0.8}
+                        >
+                            <Text style={[
+                                styles.toggleIcon,
+                                { color: viewMode === view.key ? currentTheme.surface : currentTheme.text }
+                            ]}>
+                                {view.icon}
+                            </Text>
+                            <Text style={[
+                                styles.toggleText,
+                                { color: viewMode === view.key ? currentTheme.surface : currentTheme.text }
+                            ]}>
+                                {view.label}
+                            </Text>
+                        </TouchableOpacity>
+                    ))}
                 </View>
 
-                <View style={styles.statusId}>
-                    <Text style={[styles.statusIdText, { color: currentTheme.textSecondary }]}>
-                        ID: {keyPair ? formatFingerprint(keyPair.getFingerprint()) : 'UNKNOWN'}
-                    </Text>
-                </View>
-            </View>
+                {/* Content Area */}
+                <ScrollView
+                    style={styles.content}
+                    refreshControl={
+                        <RefreshControl
+                            refreshing={refreshing}
+                            onRefresh={handleRefresh}
+                            tintColor={currentTheme.primary}
+                        />
+                    }
+                    showsVerticalScrollIndicator={false}
+                >
+                    {viewMode === 'radar' && renderRadarView()}
+                    {viewMode === 'grid' && renderGridView()}
+                    {viewMode === 'stats' && renderStatsView()}
+                </ScrollView>
 
-            <View style={[styles.tabBar, {
-                backgroundColor: currentTheme.background,
-                borderBottomColor: currentTheme.primary
-            }]}>
-                {[
-                    { key: 'mesh', icon: '◈', text: 'MESH' },
-                    { key: 'nodes', icon: '◎', text: 'NODES' },
-                    { key: 'stats', icon: '▦', text: 'STATS' },
-                    { key: 'logs', icon: '▶', text: 'LOGS' }
-                ].map(tab => (
+                {/* Selected Node Panel */}
+                {selectedNode && (
+                    <View style={[styles.nodePanel, { backgroundColor: currentTheme.surface }]}>
+                        <View style={styles.nodePanelHeader}>
+                            <Text style={[styles.nodePanelTitle, { color: currentTheme.text }]}>
+                                NODE DETAILS
+                            </Text>
+                            <TouchableOpacity
+                                onPress={() => setSelectedNode(null)}
+                                style={styles.nodePanelClose}
+                            >
+                                <Text style={[styles.nodePanelCloseText, { color: currentTheme.textSecondary }]}>
+                                    ✕
+                                </Text>
+                            </TouchableOpacity>
+                        </View>
+
+                        <View style={styles.nodePanelContent}>
+                            <View style={styles.nodeDetailRow}>
+                                <Text style={[styles.nodeDetailLabel, { color: currentTheme.textSecondary }]}>
+                                    FINGERPRINT
+                                </Text>
+                                <Text style={[styles.nodeDetailValue, { color: currentTheme.text }]}>
+                                    {formatFingerprint(selectedNode)}
+                                </Text>
+                            </View>
+
+                            <View style={styles.nodeDetailRow}>
+                                <Text style={[styles.nodeDetailLabel, { color: currentTheme.textSecondary }]}>
+                                    SIGNAL
+                                </Text>
+                                <Text style={[styles.nodeDetailValue, { color: currentTheme.text }]}>
+                                    {discoveredNodes.get(selectedNode)?.rssi || 'N/A'} dBm
+                                </Text>
+                            </View>
+
+                            <View style={styles.nodeDetailRow}>
+                                <Text style={[styles.nodeDetailLabel, { color: currentTheme.textSecondary }]}>
+                                    STATUS
+                                </Text>
+                                <Text style={[
+                                    styles.nodeDetailValue,
+                                    { color: connectedNodes.has(selectedNode) ? currentTheme.success : currentTheme.warning }
+                                ]}>
+                                    {connectedNodes.has(selectedNode) ? 'CONNECTED' : 'AVAILABLE'}
+                                </Text>
+                            </View>
+                        </View>
+
+                        <TouchableOpacity
+                            style={[
+                                styles.nodePanelAction,
+                                { 
+                                    backgroundColor: connectedNodes.has(selectedNode) 
+                                        ? currentTheme.error 
+                                        : currentTheme.primary 
+                                }
+                            ]}
+                            onPress={() => {
+                                if (connectedNodes.has(selectedNode)) {
+                                    disconnectFromNode(selectedNode);
+                                } else {
+                                    connectToNode(selectedNode);
+                                }
+                                setSelectedNode(null);
+                            }}
+                            activeOpacity={0.8}
+                        >
+                            <Text style={[styles.nodePanelActionText, { color: currentTheme.surface }]}>
+                                {connectedNodes.has(selectedNode) ? 'DISCONNECT' : 'CONNECT'}
+                            </Text>
+                        </TouchableOpacity>
+                    </View>
+                )}
+
+                {/* Control Bar */}
+                <View style={[styles.controlBar, { backgroundColor: currentTheme.surface }]}>
                     <TouchableOpacity
-                        key={tab.key}
                         style={[
-                            styles.tab,
-                            viewMode === tab.key && {
-                                backgroundColor: currentTheme.surface,
-                                borderBottomColor: currentTheme.primary
+                            styles.controlButton,
+                            { 
+                                backgroundColor: isScanning ? currentTheme.primary : 'transparent',
+                                borderColor: currentTheme.primary
                             }
                         ]}
-                        onPress={() => setViewMode(tab.key as any)}
-                        activeOpacity={0.7}
+                        onPress={isScanning ? stopScanning : startScanning}
+                        activeOpacity={0.8}
                     >
-                        <Text style={[styles.tabIcon, { color: currentTheme.primary }]}>
-                            {tab.icon}
-                        </Text>
-                        <Text style={[styles.tabText, { color: currentTheme.primary }]}>
-                            {tab.text}
+                        <Text style={[
+                            styles.controlText,
+                            { color: isScanning ? currentTheme.surface : currentTheme.primary }
+                        ]}>
+                            {isScanning ? 'STOP SCAN' : 'START SCAN'}
                         </Text>
                     </TouchableOpacity>
-                ))}
-            </View>
 
-            <View style={styles.content}>
-                {viewMode === 'mesh' && (
-                    <ScrollView
-                        refreshControl={
-                            <RefreshControl
-                                refreshing={refreshing}
-                                onRefresh={handleRefresh}
-                                tintColor={currentTheme.primary}
-                            />
-                        }
-                        showsVerticalScrollIndicator={false}
+                    <TouchableOpacity
+                        style={[
+                            styles.controlButton,
+                            { 
+                                backgroundColor: isAdvertising ? currentTheme.primary : 'transparent',
+                                borderColor: currentTheme.primary
+                            }
+                        ]}
+                        onPress={isAdvertising ? stopAdvertising : startAdvertising}
+                        activeOpacity={0.8}
                     >
-                        {renderMeshView()}
-                    </ScrollView>
-                )}
-                {viewMode === 'nodes' && renderNodesView()}
-                {viewMode === 'stats' && renderStatsView()}
-                {viewMode === 'logs' && renderLogsView()}
-            </View>
-
-            <View style={[styles.controlBar, {
-                backgroundColor: currentTheme.surface,
-                borderTopColor: currentTheme.primary
-            }]}>
-                <TouchableOpacity
-                    style={[
-                        styles.controlButton,
-                        {
-                            backgroundColor: currentTheme.background,
-                            borderColor: currentTheme.primary
-                        },
-                        isScanning && {
-                            backgroundColor: currentTheme.surface,
-                            borderWidth: 2
-                        }
-                    ]}
-                    onPress={isScanning ? stopScanning : startScanning}
-                    activeOpacity={0.7}
-                >
-                    <Text style={[styles.controlButtonIcon, { color: currentTheme.primary }]}>
-                        {isScanning ? '◼' : '▶'}
-                    </Text>
-                    <Text style={[styles.controlButtonText, { color: currentTheme.primary }]}>
-                        {isScanning ? 'STOP' : 'SCAN'}
-                    </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={[styles.controlButton, {
-                        backgroundColor: currentTheme.background,
-                        borderColor: currentTheme.primary
-                    }]}
-                    onPress={handleRefresh}
-                    activeOpacity={0.7}
-                >
-                    <Text style={[styles.controlButtonIcon, { color: currentTheme.primary }]}>⟲</Text>
-                    <Text style={[styles.controlButtonText, { color: currentTheme.primary }]}>REFRESH</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={[
-                        styles.controlButton,
-                        {
-                            backgroundColor: currentTheme.background,
-                            borderColor: currentTheme.primary
-                        },
-                        isAdvertising && {
-                            backgroundColor: currentTheme.surface,
-                            borderWidth: 2
-                        }
-                    ]}
-                    onPress={toggleBeacon}
-                    activeOpacity={0.7}
-                >
-                    <Text style={[styles.controlButtonIcon, { color: currentTheme.primary }]}>
-                        {isAdvertising ? '◉' : '○'}
-                    </Text>
-                    <Text style={[styles.controlButtonText, { color: currentTheme.primary }]}>BEACON</Text>
-                </TouchableOpacity>
-            </View>
+                        <Text style={[
+                            styles.controlText,
+                            { color: isAdvertising ? currentTheme.surface : currentTheme.primary }
+                        ]}>
+                            {isAdvertising ? 'BEACON ON' : 'BEACON OFF'}
+                        </Text>
+                    </TouchableOpacity>
+                </View>
+            </Animated.View>
         </View>
     );
 };
@@ -845,72 +627,89 @@ const styles = StyleSheet.create({
     container: {
         flex: 1,
     },
+    mainContainer: {
+        flex: 1,
+    },
 
-    // Status Bar
-    statusBar: {
+    // Header
+    header: {
+        paddingTop: 15,
+        paddingHorizontal: 20,
+        paddingBottom: 10,
+        elevation: 2,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
+    },
+    headerTop: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 10,
+    },
+    headerTitle: {
+        fontSize: 16,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
+        letterSpacing: 3,
+    },
+    headerStatus: {
         flexDirection: 'row',
         alignItems: 'center',
-        paddingHorizontal: 15,
-        paddingVertical: 12,
-        borderBottomWidth: 1,
-    },
-    statusSection: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginRight: 20,
-    },
-    statusIndicator: {
-        marginRight: 6,
-        shadowRadius: 6,
-        shadowOpacity: 0.8,
     },
     statusDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+        marginRight: 8,
+    },
+    statusText: {
+        fontSize: 11,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
+        letterSpacing: 1,
+    },
+    idBar: {
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
+    idLabel: {
+        fontSize: 10,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
+        marginRight: 8,
+        letterSpacing: 1,
+    },
+    idValue: {
         fontSize: 12,
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-    },
-    statusLabel: {
         fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
-        opacity: 0.8,
-        letterSpacing: 1,
-    },
-    statusId: {
-        marginLeft: 'auto',
-    },
-    statusIdText: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
-        opacity: 0.6,
-        letterSpacing: 1,
+        fontWeight: '500',
     },
 
-    // Tab Bar
-    tabBar: {
+    // View Toggle
+    viewToggle: {
         flexDirection: 'row',
-        borderBottomWidth: 1,
+        paddingHorizontal: 20,
+        paddingVertical: 10,
     },
-    tab: {
+    toggleButton: {
         flex: 1,
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'center',
-        paddingVertical: 12,
-        opacity: 0.5,
+        paddingVertical: 10,
+        marginHorizontal: 5,
     },
-    tabActive: {
-        opacity: 1,
-        borderBottomWidth: 2,
-    },
-    tabIcon: {
+    toggleIcon: {
         fontSize: 14,
         marginRight: 6,
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
     },
-    tabText: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
+    toggleText: {
         fontSize: 11,
-        fontWeight: 'bold',
-        letterSpacing: 1,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        letterSpacing: 1.5,
     },
 
     // Content
@@ -918,319 +717,221 @@ const styles = StyleSheet.create({
         flex: 1,
     },
 
-    // Mesh View
-    meshContainer: {
+    // Radar View
+    radarContainer: {
         padding: 20,
+        alignItems: 'center',
     },
-    meshVisualization: {
+    radarDisplay: {
+        position: 'relative',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 1000,
+        overflow: 'hidden',
+    },
+    radarRing: {
+        position: 'absolute',
         borderWidth: 1,
-        padding: 20,
-        marginBottom: 20,
+        borderRadius: 1000,
     },
-    meshTitle: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 12,
-        fontWeight: 'bold',
-        letterSpacing: 2,
-        textAlign: 'center',
-        marginBottom: 20,
-        opacity: 0.8,
-    },
-    meshCenter: {
-        alignItems: 'center',
-        justifyContent: 'center',
-        minHeight: 250,
-    },
-    centralNode: {
+    radarSweep: {
         position: 'absolute',
-        zIndex: 10,
-    },
-    centralNodeInner: {
-        width: 80,
-        height: 80,
-        borderWidth: 2,
-        alignItems: 'center',
-        justifyContent: 'center',
-    },
-    centralNodeIcon: {
-        fontSize: 24,
-        marginBottom: 5,
-    },
-    centralNodeLabel: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 12,
-        fontWeight: 'bold',
-    },
-    meshGrid: {
-        position: 'absolute',
-        width: '100%',
-        height: '100%',
-        alignItems: 'center',
-        justifyContent: 'center',
-    },
-    meshNode: {
-        position: 'absolute',
-        alignItems: 'center',
-    },
-    connectionLine: {
-        position: 'absolute',
+        width: '50%',
         height: 1,
         opacity: 0.3,
+        transformOrigin: 'left center',
     },
-    nodeButton: {
+    centerNode: {
         width: 60,
         height: 60,
-        borderWidth: 1,
+        borderRadius: 30,
         alignItems: 'center',
         justifyContent: 'center',
-        padding: 5,
-        shadowRadius: 10,
-        shadowOpacity: 0.8,
+        zIndex: 10,
     },
-    nodeIcon: {
-        fontSize: 16,
-        marginBottom: 2,
+    centerNodeInner: {
+        width: 54,
+        height: 54,
+        borderRadius: 27,
+        alignItems: 'center',
+        justifyContent: 'center',
     },
-    nodeIdShort: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 8,
-        opacity: 0.8,
+    centerNodeText: {
+        fontSize: 12,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        letterSpacing: 1,
     },
-    nodeSignalBars: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 8,
-        marginTop: 2,
-    },
-    moreNodesIndicator: {
+    connectionBeam: {
         position: 'absolute',
-        bottom: -30,
-        paddingHorizontal: 10,
-        paddingVertical: 3,
-        borderWidth: 1,
+        height: 1,
+        transformOrigin: 'left center',
     },
-    moreNodesText: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 9,
-        opacity: 0.7,
-    },
-    emptyMesh: {
+    radarNode: {
+        position: 'absolute',
+        width: 50,
+        height: 50,
+        borderRadius: 25,
         alignItems: 'center',
         justifyContent: 'center',
-        paddingVertical: 40,
     },
-    emptyMeshIcon: {
-        fontSize: 40,
-        opacity: 0.2,
-        marginBottom: 15,
-    },
-    emptyMeshText: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 14,
-        fontWeight: 'bold',
-        opacity: 0.6,
-        letterSpacing: 2,
-    },
-    emptyMeshSubtext: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
-        opacity: 0.4,
-        marginTop: 5,
-    },
-
-    // Quick Stats
-    quickStats: {
-        flexDirection: 'row',
-        borderWidth: 1,
-        padding: 15,
-        marginBottom: 20,
-    },
-    quickStatItem: {
-        flex: 1,
-        alignItems: 'center',
-    },
-    quickStatValue: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 18,
-        fontWeight: 'bold',
+    radarNodeDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
         marginBottom: 3,
     },
-    quickStatLabel: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    radarNodeId: {
         fontSize: 9,
-        opacity: 0.6,
-        letterSpacing: 1,
-    },
-    quickStatDivider: {
-        width: 1,
-        opacity: 0.3,
-        marginHorizontal: 10,
-    },
-
-    // Node Detail Card
-    nodeDetailCard: {
-        borderWidth: 1,
-        padding: 15,
-    },
-    nodeDetailHeader: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        marginBottom: 15,
-    },
-    nodeDetailTitle: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 12,
-        fontWeight: 'bold',
-        letterSpacing: 1,
-    },
-    nodeDetailClose: {
-        padding: 5,
-    },
-    nodeDetailCloseText: {
-        fontSize: 16,
-        opacity: 0.6,
-    },
-    nodeDetailContent: {
-        marginBottom: 15,
-    },
-    nodeDetailRow: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        marginBottom: 8,
-    },
-    nodeDetailLabel: {
         fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
-        opacity: 0.6,
+        fontWeight: '500',
+    },
+    distanceLabel: {
+        position: 'absolute',
+        fontSize: 9,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
         letterSpacing: 1,
     },
-    nodeDetailValue: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
+    distanceLabelTop: { top: 10, left: '50%', marginLeft: -15 },
+    distanceLabelBottom: { bottom: 10, left: '50%', marginLeft: -15 },
+    distanceLabelLeft: { left: 10, top: '50%', marginTop: -10 },
+    distanceLabelRight: { right: 10, top: '50%', marginTop: -10 },
+    signalLegend: {
+        marginTop: 20,
+        paddingVertical: 15,
+        paddingHorizontal: 20,
+        width: '100%',
     },
-    nodeDetailAction: {
-        paddingVertical: 10,
-        borderWidth: 1,
-        alignItems: 'center',
-    },
-    nodeDetailActionText: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
+    legendTitle: {
         fontSize: 11,
-        fontWeight: 'bold',
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
         letterSpacing: 2,
+        marginBottom: 10,
+        textAlign: 'center',
+    },
+    legendItems: {
+        flexDirection: 'row',
+        justifyContent: 'space-around',
+    },
+    legendItem: {
+        alignItems: 'center',
+    },
+    legendDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+        marginBottom: 4,
+    },
+    legendText: {
+        fontSize: 9,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
     },
 
-    // Nodes List
-    nodesContainer: {
+    // Grid View
+    gridContainer: {
         flex: 1,
         padding: 20,
     },
-    nodesHeader: {
+    gridHeader: {
         flexDirection: 'row',
         alignItems: 'center',
-        marginBottom: 20,
-    },
-    nodesTitle: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 14,
-        fontWeight: 'bold',
-        letterSpacing: 2,
-    },
-    nodesCount: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 12,
-        opacity: 0.6,
-        marginLeft: 10,
-    },
-    emptyNodes: {
-        alignItems: 'center',
-        paddingTop: 50,
-    },
-    emptyNodesIcon: {
-        fontSize: 30,
-        opacity: 0.2,
-        marginBottom: 20,
-    },
-    emptyNodesText: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 14,
-        fontWeight: 'bold',
-        opacity: 0.6,
-        letterSpacing: 2,
-        marginBottom: 20,
-    },
-    emptyScanButton: {
-        paddingHorizontal: 20,
-        paddingVertical: 10,
-        borderWidth: 1,
-    },
-    emptyScanButtonText: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 12,
-        fontWeight: 'bold',
-        letterSpacing: 1,
-    },
-    nodesList: {
-        flex: 1,
-    },
-    nodeListItem: {
-        flexDirection: 'row',
         justifyContent: 'space-between',
-        alignItems: 'center',
-        paddingVertical: 12,
-        paddingHorizontal: 15,
+        marginBottom: 20,
+    },
+    gridTitle: {
+        fontSize: 14,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
+        letterSpacing: 2,
+    },
+    gridCount: {
+        paddingHorizontal: 12,
+        paddingVertical: 4,
+    },
+    gridCountText: {
+        fontSize: 12,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+    },
+    nodeGrid: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        justifyContent: 'space-between',
+    },
+    gridNode: {
+        width: '48%',
+        padding: 15,
+        marginBottom: 15,
         borderWidth: 1,
+        alignItems: 'center',
+    },
+    gridNodeStatus: {
+        width: 12,
+        height: 12,
+        borderRadius: 6,
+        marginBottom: 10,
+    },
+    gridNodeId: {
+        fontSize: 11,
+        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+        fontWeight: '500',
+        marginBottom: 10,
+    },
+    gridNodeSignal: {
+        flexDirection: 'row',
+        alignItems: 'flex-end',
+        height: 20,
         marginBottom: 8,
     },
-    nodeListLeft: {
-        flexDirection: 'row',
-        alignItems: 'center',
+    signalBar: {
+        width: 3,
+        marginHorizontal: 1,
     },
-    nodeListIcon: {
-        fontSize: 16,
-        marginRight: 12,
-        opacity: 0.6,
-    },
-    nodeListIconConnected: {
-        opacity: 1,
-    },
-    nodeListInfo: {
-        justifyContent: 'center',
-    },
-    nodeListId: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 12,
-        fontWeight: 'bold',
-    },
-    nodeListAlias: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
-        opacity: 0.6,
-        marginTop: 2,
-    },
-    nodeListRight: {
-        alignItems: 'flex-end',
-    },
-    nodeListSignal: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
-        marginBottom: 2,
-    },
-    nodeListRssi: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    gridNodeLabel: {
         fontSize: 9,
-        opacity: 0.6,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
+        letterSpacing: 1,
+    },
+    emptyGrid: {
+        alignItems: 'center',
+        paddingVertical: 60,
+    },
+    emptyIcon: {
+        width: 80,
+        height: 80,
+        borderRadius: 40,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginBottom: 20,
+    },
+    emptyIconText: {
+        fontSize: 40,
+    },
+    emptyTitle: {
+        fontSize: 16,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
+        marginBottom: 8,
+    },
+    emptySubtitle: {
+        fontSize: 13,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
     },
 
-    // Stats
+    // Stats View
     statsContainer: {
         flex: 1,
         padding: 20,
     },
     statsTitle: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
         fontSize: 14,
-        fontWeight: 'bold',
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
         letterSpacing: 2,
         marginBottom: 20,
         textAlign: 'center',
@@ -1243,143 +944,132 @@ const styles = StyleSheet.create({
     },
     statCard: {
         width: '48%',
-        borderWidth: 1,
-        padding: 15,
+        paddingVertical: 20,
+        paddingHorizontal: 15,
+        marginBottom: 15,
         alignItems: 'center',
+    },
+    statIcon: {
+        fontSize: 24,
         marginBottom: 10,
     },
-    statCardIcon: {
-        fontSize: 20,
-        marginBottom: 8,
-        opacity: 0.8,
-    },
-    statCardValue: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 20,
-        fontWeight: 'bold',
+    statValue: {
+        fontSize: 18,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
         marginBottom: 5,
     },
-    statCardLabel: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 9,
-        opacity: 0.6,
-        letterSpacing: 1,
-    },
-    routingSection: {
-        borderWidth: 1,
-        padding: 15,
-    },
-    routingSectionTitle: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 12,
-        fontWeight: 'bold',
-        letterSpacing: 1,
-        marginBottom: 15,
-    },
-    routingPath: {
-        marginBottom: 10,
-    },
-    routingPathLabel: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    statLabel: {
         fontSize: 10,
-        opacity: 0.6,
-        marginBottom: 3,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
+        letterSpacing: 1,
+        textAlign: 'center',
     },
-    routingPathValue: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 11,
-        marginLeft: 10,
+    activityGraph: {
+        padding: 20,
+        height: 200,
+    },
+    graphTitle: {
+        fontSize: 12,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        letterSpacing: 1.5,
+        marginBottom: 20,
+    },
+    graphBars: {
+        flex: 1,
+        flexDirection: 'row',
+        alignItems: 'flex-end',
+        justifyContent: 'space-around',
+    },
+    graphBar: {
+        width: 30,
     },
 
-    // Logs
-    logsContainer: {
-        flex: 1,
+    // Node Panel
+    nodePanel: {
+        position: 'absolute',
+        bottom: 0,
+        left: 0,
+        right: 0,
         padding: 20,
+        elevation: 8,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: -2 },
+        shadowOpacity: 0.2,
+        shadowRadius: 8,
     },
-    logsHeader: {
+    nodePanelHeader: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        marginBottom: 15,
+        marginBottom: 20,
     },
-    logsTitle: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 14,
-        fontWeight: 'bold',
+    nodePanelTitle: {
+        fontSize: 12,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
         letterSpacing: 2,
     },
-    logsAutoScroll: {
-        paddingHorizontal: 12,
-        paddingVertical: 5,
-        borderWidth: 1,
-        opacity: 0.5,
+    nodePanelClose: {
+        padding: 5,
     },
-    logsAutoScrollActive: {
-        opacity: 1,
+    nodePanelCloseText: {
+        fontSize: 18,
     },
-    logsAutoScrollText: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
+    nodePanelContent: {
+        marginBottom: 20,
+    },
+    nodeDetailRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        marginBottom: 12,
+    },
+    nodeDetailLabel: {
+        fontSize: 11,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
         letterSpacing: 1,
     },
-    logsContent: {
-        flex: 1,
-        borderWidth: 1,
-        padding: 10,
-    },
-    logEntry: {
-        flexDirection: 'row',
-        marginBottom: 5,
-    },
-    logTime: {
+    nodeDetailValue: {
+        fontSize: 12,
         fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
-        opacity: 0.5,
-        marginRight: 8,
+        fontWeight: '500',
     },
-    logMessage: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 10,
-        flex: 1,
+    nodePanelAction: {
+        paddingVertical: 14,
+        alignItems: 'center',
     },
-    logEnd: {
-        marginTop: 10,
-        paddingTop: 10,
-        borderTopWidth: 1,
-        opacity: 0.3,
-    },
-    logEndText: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 9,
-        textAlign: 'center',
-        opacity: 0.5,
+    nodePanelActionText: {
+        fontSize: 12,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        letterSpacing: 2,
     },
 
     // Control Bar
     controlBar: {
         flexDirection: 'row',
-        padding: 12,
-        borderTopWidth: 1,
+        padding: 20,
+        elevation: 8,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: -2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
     },
     controlButton: {
         flex: 1,
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        paddingVertical: 10,
-        marginHorizontal: 5,
+        paddingVertical: 12,
+        marginHorizontal: 10,
         borderWidth: 1,
+        alignItems: 'center',
     },
-    controlButtonIcon: {
-        fontSize: 14,
-        marginRight: 6,
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    },
-    controlButtonText: {
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
+    controlText: {
         fontSize: 11,
-        fontWeight: 'bold',
-        letterSpacing: 1,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        letterSpacing: 1.5,
     },
 });
 

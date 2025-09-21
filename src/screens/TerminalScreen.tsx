@@ -10,15 +10,25 @@ import {
     TouchableOpacity,
     Animated,
     Dimensions,
+    FlatList,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useGhostComm } from '../context/GhostCommContext';
+import { useTheme } from '../context/ThemeContext';
 
-interface TerminalLine {
+interface CommandItem {
     id: string;
-    text: string;
-    type: 'input' | 'output' | 'error' | 'success' | 'system' | 'warning';
+    command: string;
+    response: string;
     timestamp: number;
+    status: 'success' | 'error' | 'warning' | 'info';
+}
+
+interface QuickCommand {
+    label: string;
+    command: string;
+    icon: string;
+    description: string;
 }
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -32,386 +42,380 @@ const TerminalScreen: React.FC = () => {
         networkStats,
         isScanning,
         isAdvertising,
-        systemLogs,
     } = useGhostComm();
 
-    const [commandHistory, setCommandHistory] = useState<string[]>([]);
-    const [historyIndex, setHistoryIndex] = useState(-1);
+    const { currentTheme } = useTheme();
+
+    const [commandHistory, setCommandHistory] = useState<CommandItem[]>([]);
     const [currentInput, setCurrentInput] = useState('');
-    const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
-    const [showCursor, setShowCursor] = useState(true);
-    const [alias, setAlias] = useState('ghost');
     const [isProcessing, setIsProcessing] = useState(false);
-    const [showQuickActions, setShowQuickActions] = useState(false);
+    const [activeView, setActiveView] = useState<'commands' | 'quickActions'>('commands');
+    const [searchQuery, setSearchQuery] = useState('');
 
     const scrollViewRef = useRef<ScrollView>(null);
-    const inputRef = useRef<TextInput>(null);
-
-    // Animation values
     const fadeAnim = useRef(new Animated.Value(0)).current;
-    const pulseAnim = useRef(new Animated.Value(1)).current;
-    const slideAnim = useRef(new Animated.Value(-100)).current;
 
-    // Load command history and alias
+    // Quick commands configuration
+    const quickCommands: QuickCommand[] = [
+        { label: 'SCAN', command: 'scan', icon: '◉', description: 'Discover nearby nodes' },
+        { label: 'BEACON', command: 'beacon', icon: '⟟', description: 'Broadcast presence' },
+        { label: 'NODES', command: 'nodes', icon: '◈', description: 'List all nodes' },
+        { label: 'STATUS', command: 'status', icon: '◎', description: 'Network status' },
+        { label: 'SEND', command: 'send', icon: '→', description: 'Send message' },
+        { label: 'PEERS', command: 'peers', icon: '◊', description: 'Connected peers' },
+        { label: 'ROUTES', command: 'routes', icon: '⟆', description: 'Routing table' },
+        { label: 'STATS', command: 'stats', icon: '≣', description: 'Network statistics' },
+        { label: 'CLEAR', command: 'clear', icon: '○', description: 'Clear history' },
+        { label: 'EXPORT', command: 'export', icon: '↗', description: 'Export keys' },
+        { label: 'SETTINGS', command: 'settings', icon: '⚙', description: 'Configuration' },
+        { label: 'HELP', command: 'help', icon: '?', description: 'Command reference' },
+    ];
+
     useEffect(() => {
-        const loadData = async () => {
-            const [savedHistory, savedAlias] = await Promise.all([
-                AsyncStorage.getItem('@ghostcomm_terminal_history'),
-                AsyncStorage.getItem('@ghostcomm_alias'),
-            ]);
-
-            if (savedHistory) {
-                setCommandHistory(JSON.parse(savedHistory));
-            }
-            if (savedAlias) {
-                setAlias(savedAlias);
-            }
-        };
-
-        loadData();
-
-        // Smooth fade-in animation
         Animated.timing(fadeAnim, {
             toValue: 1,
-            duration: 1000,
+            duration: 400,
             useNativeDriver: true,
         }).start();
 
-        // Initial welcome message - much simpler
-        setTimeout(() => {
-            addLine('GhostComm Terminal v2.0', 'system');
-            addLine('Type "help" for commands • "?" for quick guide', 'system');
-        }, 500);
+        loadCommandHistory();
     }, []);
 
-    // Pulse animation for active states
-    useEffect(() => {
-        if (isScanning || isAdvertising) {
-            Animated.loop(
-                Animated.sequence([
-                    Animated.timing(pulseAnim, {
-                        toValue: 1.2,
-                        duration: 1000,
-                        useNativeDriver: true,
-                    }),
-                    Animated.timing(pulseAnim, {
-                        toValue: 1,
-                        duration: 1000,
-                        useNativeDriver: true,
-                    }),
-                ])
-            ).start();
-        } else {
-            pulseAnim.setValue(1);
-        }
-    }, [isScanning, isAdvertising]);
-
-    // Cursor blink
-    useEffect(() => {
-        const interval = setInterval(() => {
-            setShowCursor(prev => !prev);
-        }, 600);
-        return () => clearInterval(interval);
-    }, []);
-
-    // Auto-scroll to bottom
-    useEffect(() => {
-        setTimeout(() => {
-            scrollViewRef.current?.scrollToEnd({ animated: true });
-        }, 100);
-    }, [terminalLines]);
-
-    const addLine = (text: string, type: TerminalLine['type'] = 'output') => {
-        const newLine: TerminalLine = {
-            id: `${Date.now()}_${Math.random()}`,
-            text,
-            type,
-            timestamp: Date.now(),
-        };
-        setTerminalLines(prev => {
-            // Keep only last 100 lines to prevent memory issues
-            const updated = [...prev, newLine];
-            if (updated.length > 100) {
-                return updated.slice(-100);
+    const loadCommandHistory = async () => {
+        try {
+            const saved = await AsyncStorage.getItem('@ghostcomm_command_history');
+            if (saved) {
+                setCommandHistory(JSON.parse(saved));
             }
-            return updated;
-        });
+        } catch (error) {
+            console.error('Failed to load command history:', error);
+        }
     };
 
-    const saveCommandHistory = async (history: string[]) => {
+    const saveCommandHistory = async (history: CommandItem[]) => {
         try {
-            const trimmed = history.slice(-30);
-            await AsyncStorage.setItem('@ghostcomm_terminal_history', JSON.stringify(trimmed));
+            // Keep only last 50 commands
+            const trimmed = history.slice(-50);
+            await AsyncStorage.setItem('@ghostcomm_command_history', JSON.stringify(trimmed));
         } catch (error) {
             console.error('Failed to save command history:', error);
         }
     };
 
-    const handleCommand = async () => {
-        const command = currentInput.trim();
-        if (!command) return;
+    const handleCommand = async (command: string) => {
+        if (!command.trim()) return;
 
-        // Add command to display
-        addLine(`$ ${command}`, 'input');
-
-        // Add to history
-        const newHistory = [...commandHistory, command];
-        setCommandHistory(newHistory);
-        saveCommandHistory(newHistory);
-        setHistoryIndex(-1);
-
-        // Clear input and process
-        setCurrentInput('');
         setIsProcessing(true);
+        const timestamp = Date.now();
 
         try {
             const result = await executeCommand(command);
+            
+            const newItem: CommandItem = {
+                id: `${timestamp}`,
+                command: command.trim(),
+                response: result,
+                timestamp,
+                status: 'success',
+            };
 
-            // Display result cleanly
-            const lines = result.split('\n');
-            lines.forEach((line: string) => {
-                if (line.trim()) {
-                    addLine(line, 'output');
-                }
-            });
+            const updatedHistory = [...commandHistory, newItem];
+            setCommandHistory(updatedHistory);
+            saveCommandHistory(updatedHistory);
+            
+            setCurrentInput('');
+            
+            // Auto-scroll to latest
+            setTimeout(() => {
+                scrollViewRef.current?.scrollToEnd({ animated: true });
+            }, 100);
         } catch (error) {
-            addLine(`Error: ${error}`, 'error');
+            const newItem: CommandItem = {
+                id: `${timestamp}`,
+                command: command.trim(),
+                response: error instanceof Error ? error.message : String(error),
+                timestamp,
+                status: 'error',
+            };
+
+            const updatedHistory = [...commandHistory, newItem];
+            setCommandHistory(updatedHistory);
+            saveCommandHistory(updatedHistory);
         } finally {
             setIsProcessing(false);
         }
     };
 
-    const handleHistoryNavigation = (direction: 'up' | 'down') => {
-        if (commandHistory.length === 0) return;
-
-        let newIndex = historyIndex;
-
-        if (direction === 'up') {
-            newIndex = historyIndex === -1
-                ? commandHistory.length - 1
-                : Math.max(0, historyIndex - 1);
-        } else {
-            newIndex = historyIndex === commandHistory.length - 1
-                ? -1
-                : Math.min(commandHistory.length - 1, historyIndex + 1);
-        }
-
-        setHistoryIndex(newIndex);
-        setCurrentInput(newIndex === -1 ? '' : commandHistory[newIndex]);
-    };
-
     const executeQuickCommand = (cmd: string) => {
-        setCurrentInput(cmd);
-        setTimeout(handleCommand, 100);
-    };
-
-    const renderLine = (line: TerminalLine) => {
-        let style = styles.terminalText;
-
-        switch (line.type) {
-            case 'input':
-                style = styles.inputText;
-                break;
-            case 'error':
-                style = styles.errorText;
-                break;
-            case 'success':
-                style = styles.successText;
-                break;
-            case 'warning':
-                style = styles.warningText;
-                break;
-            case 'system':
-                style = styles.systemText;
-                break;
+        if (cmd === 'clear') {
+            setCommandHistory([]);
+            AsyncStorage.removeItem('@ghostcomm_command_history');
+        } else {
+            handleCommand(cmd);
         }
+    };
 
-        return (
-            <Text key={line.id} style={style}>
-                {line.text}
+    const getNetworkStatusColor = () => {
+        if (connectedNodes.size > 0) return currentTheme.success;
+        if (isScanning || isAdvertising) return currentTheme.warning;
+        return currentTheme.textTertiary;
+    };
+
+    const formatTimestamp = (timestamp: number) => {
+        const date = new Date(timestamp);
+        return date.toLocaleTimeString('en-US', { 
+            hour12: false,
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+    };
+
+    const filteredHistory = commandHistory.filter(item => 
+        item.command.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        item.response.toLowerCase().includes(searchQuery.toLowerCase())
+    );
+
+    const renderCommandItem = (item: CommandItem) => (
+        <View key={item.id} style={[styles.commandCard, { backgroundColor: currentTheme.surface }]}>
+            <View style={styles.commandHeader}>
+                <Text style={[styles.commandText, { color: currentTheme.text }]}>
+                    {item.command}
+                </Text>
+                <Text style={[styles.timestamp, { color: currentTheme.textTertiary }]}>
+                    {formatTimestamp(item.timestamp)}
+                </Text>
+            </View>
+            
+            <View style={[styles.responseDivider, { backgroundColor: currentTheme.divider }]} />
+            
+            <Text style={[
+                styles.responseText, 
+                { color: item.status === 'error' ? currentTheme.error : currentTheme.textSecondary }
+            ]}>
+                {item.response}
             </Text>
-        );
-    };
+        </View>
+    );
 
-    const getStatusColor = () => {
-        if (connectedNodes.size > 0) return '#00FF00';
-        if (isScanning || isAdvertising) return '#FFAA00';
-        return '#666666';
-    };
+    const renderQuickCommand = (item: QuickCommand) => (
+        <TouchableOpacity
+            key={item.command}
+            style={[styles.quickCommandCard, { 
+                backgroundColor: currentTheme.surface,
+                borderColor: currentTheme.border
+            }]}
+            onPress={() => executeQuickCommand(item.command)}
+            activeOpacity={0.8}
+        >
+            <Text style={[styles.quickIcon, { color: currentTheme.primary }]}>
+                {item.icon}
+            </Text>
+            <View style={styles.quickCommandInfo}>
+                <Text style={[styles.quickLabel, { color: currentTheme.text }]}>
+                    {item.label}
+                </Text>
+                <Text style={[styles.quickDescription, { color: currentTheme.textTertiary }]}>
+                    {item.description}
+                </Text>
+            </View>
+        </TouchableOpacity>
+    );
 
     return (
         <KeyboardAvoidingView
-            style={styles.container}
+            style={[styles.container, { backgroundColor: currentTheme.background }]}
             behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
             keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
         >
             <Animated.View style={[styles.mainContainer, { opacity: fadeAnim }]}>
-                {/* Minimalist Header */}
-                <View style={styles.header}>
-                    <View style={styles.headerLeft}>
-                        <Text style={styles.headerTitle}>GHOSTCOMM</Text>
-                        <Animated.View
-                            style={[
-                                styles.statusDot,
-                                {
-                                    backgroundColor: getStatusColor(),
-                                    transform: [{ scale: pulseAnim }]
-                                }
-                            ]}
+                {/* Premium Header */}
+                <View style={[styles.header, { backgroundColor: currentTheme.surface }]}>
+                    <View style={styles.headerTop}>
+                        <Text style={[styles.headerTitle, { color: currentTheme.text }]}>
+                            COMMAND CENTER
+                        </Text>
+                        <View style={[styles.statusIndicator, { backgroundColor: getNetworkStatusColor() }]} />
+                    </View>
+                    
+                    {/* Network Stats Bar */}
+                    <View style={styles.statsBar}>
+                        <View style={styles.statItem}>
+                            <Text style={[styles.statLabel, { color: currentTheme.textTertiary }]}>NODES</Text>
+                            <Text style={[styles.statValue, { color: currentTheme.text }]}>
+                                {connectedNodes.size}/{discoveredNodes.size}
+                            </Text>
+                        </View>
+                        
+                        <View style={[styles.statDivider, { backgroundColor: currentTheme.divider }]} />
+                        
+                        <View style={styles.statItem}>
+                            <Text style={[styles.statLabel, { color: currentTheme.textTertiary }]}>MESSAGES</Text>
+                            <Text style={[styles.statValue, { color: currentTheme.text }]}>
+                                {networkStats.messagesSent + networkStats.messagesReceived}
+                            </Text>
+                        </View>
+                        
+                        <View style={[styles.statDivider, { backgroundColor: currentTheme.divider }]} />
+                        
+                        <View style={styles.statItem}>
+                            <Text style={[styles.statLabel, { color: currentTheme.textTertiary }]}>IDENTITY</Text>
+                            <Text style={[styles.statValue, { color: currentTheme.text }]}>
+                                {keyPair?.getFingerprint().substring(0, 8).toUpperCase() || 'NONE'}
+                            </Text>
+                        </View>
+                    </View>
+                </View>
+
+                {/* View Toggle */}
+                <View style={[styles.viewToggle, { backgroundColor: currentTheme.surface }]}>
+                    <TouchableOpacity
+                        style={[
+                            styles.toggleButton,
+                            activeView === 'commands' && { backgroundColor: currentTheme.primary }
+                        ]}
+                        onPress={() => setActiveView('commands')}
+                        activeOpacity={0.8}
+                    >
+                        <Text style={[
+                            styles.toggleText,
+                            { color: activeView === 'commands' ? currentTheme.surface : currentTheme.text }
+                        ]}>
+                            HISTORY
+                        </Text>
+                    </TouchableOpacity>
+                    
+                    <TouchableOpacity
+                        style={[
+                            styles.toggleButton,
+                            activeView === 'quickActions' && { backgroundColor: currentTheme.primary }
+                        ]}
+                        onPress={() => setActiveView('quickActions')}
+                        activeOpacity={0.8}
+                    >
+                        <Text style={[
+                            styles.toggleText,
+                            { color: activeView === 'quickActions' ? currentTheme.surface : currentTheme.text }
+                        ]}>
+                            QUICK ACTIONS
+                        </Text>
+                    </TouchableOpacity>
+                </View>
+
+                {/* Search Bar (for command history) */}
+                {activeView === 'commands' && (
+                    <View style={[styles.searchBar, { backgroundColor: currentTheme.surface }]}>
+                        <TextInput
+                            style={[styles.searchInput, { color: currentTheme.text }]}
+                            placeholder="Search history..."
+                            placeholderTextColor={currentTheme.textTertiary}
+                            value={searchQuery}
+                            onChangeText={setSearchQuery}
                         />
                     </View>
-
-                    <TouchableOpacity
-                        onPress={() => setShowQuickActions(!showQuickActions)}
-                        style={styles.menuButton}
-                    >
-                        <Text style={styles.menuIcon}>{showQuickActions ? '×' : '≡'}</Text>
-                    </TouchableOpacity>
-                </View>
-
-                {/* Quick Actions Panel (Hidden by default) */}
-                {showQuickActions && (
-                    <Animated.View style={styles.quickActionsPanel}>
-                        <View style={styles.quickActionsRow}>
-                            <TouchableOpacity
-                                style={[styles.quickActionBtn, isScanning && styles.activeBtn]}
-                                onPress={() => executeQuickCommand(isScanning ? 'stop' : 'scan')}
-                            >
-                                <Text style={styles.quickActionText}>
-                                    {isScanning ? 'SCANNING' : 'SCAN'}
-                                </Text>
-                            </TouchableOpacity>
-
-                            <TouchableOpacity
-                                style={[styles.quickActionBtn, isAdvertising && styles.activeBtn]}
-                                onPress={() => executeQuickCommand(isAdvertising ? 'stop' : 'beacon')}
-                            >
-                                <Text style={styles.quickActionText}>
-                                    {isAdvertising ? 'BEACON ON' : 'BEACON'}
-                                </Text>
-                            </TouchableOpacity>
-
-                            <TouchableOpacity
-                                style={styles.quickActionBtn}
-                                onPress={() => executeQuickCommand('nodes')}
-                            >
-                                <Text style={styles.quickActionText}>NODES</Text>
-                            </TouchableOpacity>
-
-                            <TouchableOpacity
-                                style={styles.quickActionBtn}
-                                onPress={() => executeQuickCommand('status')}
-                            >
-                                <Text style={styles.quickActionText}>STATUS</Text>
-                            </TouchableOpacity>
-                        </View>
-                    </Animated.View>
                 )}
 
-                {/* Clean Status Bar */}
-                <View style={styles.statusBar}>
-                    <View style={styles.statusItem}>
-                        <Text style={styles.statusLabel}>NODES</Text>
-                        <Text style={styles.statusValue}>
-                            {connectedNodes.size}/{discoveredNodes.size}
-                        </Text>
-                    </View>
-
-                    <View style={styles.statusDivider} />
-
-                    <View style={styles.statusItem}>
-                        <Text style={styles.statusLabel}>MSG</Text>
-                        <Text style={styles.statusValue}>
-                            {networkStats.messagesSent + networkStats.messagesReceived}
-                        </Text>
-                    </View>
-
-                    <View style={styles.statusDivider} />
-
-                    <View style={styles.statusItem}>
-                        <Text style={styles.statusLabel}>ID</Text>
-                        <Text style={styles.statusValue}>
-                            {keyPair?.getFingerprint().substring(0, 6).toUpperCase() || 'NONE'}
-                        </Text>
-                    </View>
-                </View>
-
-                {/* Terminal Output Area */}
+                {/* Main Content Area */}
                 <ScrollView
                     ref={scrollViewRef}
-                    style={styles.terminalOutput}
-                    contentContainerStyle={styles.terminalContent}
+                    style={styles.contentArea}
+                    contentContainerStyle={styles.contentContainer}
                     showsVerticalScrollIndicator={false}
                 >
-                    {terminalLines.map(renderLine)}
-
-                    {/* Current Input Line */}
-                    <View style={styles.currentLine}>
-                        <Text style={styles.prompt}>$ </Text>
-                        <Text style={styles.currentInput}>{currentInput}</Text>
-                        {!isProcessing && (
-                            <Text style={styles.cursor}>
-                                {showCursor ? '█' : ' '}
-                            </Text>
-                        )}
-                        {isProcessing && (
-                            <Text style={styles.processingIndicator}>...</Text>
-                        )}
-                    </View>
+                    {activeView === 'commands' ? (
+                        filteredHistory.length > 0 ? (
+                            filteredHistory.map(renderCommandItem)
+                        ) : (
+                            <View style={styles.emptyState}>
+                                <Text style={[styles.emptyIcon, { color: currentTheme.textTertiary }]}>○</Text>
+                                <Text style={[styles.emptyText, { color: currentTheme.textTertiary }]}>
+                                    {searchQuery ? 'No matching commands found' : 'No command history yet'}
+                                </Text>
+                                <Text style={[styles.emptySubtext, { color: currentTheme.textTertiary }]}>
+                                    Type a command below to get started
+                                </Text>
+                            </View>
+                        )
+                    ) : (
+                        <View style={styles.quickCommandsGrid}>
+                            {quickCommands.map(renderQuickCommand)}
+                        </View>
+                    )}
                 </ScrollView>
 
-                {/* Hidden Input */}
-                <TextInput
-                    ref={inputRef}
-                    style={styles.hiddenInput}
-                    value={currentInput}
-                    onChangeText={setCurrentInput}
-                    onSubmitEditing={handleCommand}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    autoFocus={true}
-                    blurOnSubmit={false}
-                />
-
-                {/* Minimal Input Bar */}
-                <View style={styles.inputBar}>
-                    <TouchableOpacity
-                        style={styles.inputButton}
-                        onPress={() => handleHistoryNavigation('up')}
-                    >
-                        <Text style={styles.inputButtonText}>↑</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                        style={styles.inputButton}
-                        onPress={() => handleHistoryNavigation('down')}
-                    >
-                        <Text style={styles.inputButtonText}>↓</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                        style={styles.helpButton}
-                        onPress={() => executeQuickCommand('help')}
-                    >
-                        <Text style={styles.helpButtonText}>?</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                        style={styles.clearButton}
-                        onPress={() => setTerminalLines([])}
-                    >
-                        <Text style={styles.clearButtonText}>CLR</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                        style={[styles.executeButton, isProcessing && styles.executeButtonDisabled]}
-                        onPress={handleCommand}
-                        disabled={isProcessing}
-                    >
-                        <Text style={styles.executeButtonText}>
-                            {isProcessing ? '...' : 'RUN'}
-                        </Text>
-                    </TouchableOpacity>
+                {/* Premium Input Area */}
+                <View style={[styles.inputArea, { backgroundColor: currentTheme.surface }]}>
+                    <View style={[styles.inputContainer, { borderColor: currentTheme.border }]}>
+                        <TextInput
+                            style={[styles.commandInput, { color: currentTheme.text }]}
+                            placeholder="Enter command..."
+                            placeholderTextColor={currentTheme.textTertiary}
+                            value={currentInput}
+                            onChangeText={setCurrentInput}
+                            onSubmitEditing={() => handleCommand(currentInput)}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            returnKeyType="send"
+                            editable={!isProcessing}
+                        />
+                        
+                        <TouchableOpacity
+                            style={[
+                                styles.sendButton,
+                                { backgroundColor: currentInput.trim() ? currentTheme.primary : currentTheme.surface },
+                                isProcessing && styles.sendButtonDisabled
+                            ]}
+                            onPress={() => handleCommand(currentInput)}
+                            disabled={!currentInput.trim() || isProcessing}
+                            activeOpacity={0.8}
+                        >
+                            <Text style={[
+                                styles.sendButtonText,
+                                { color: currentInput.trim() ? currentTheme.surface : currentTheme.textTertiary }
+                            ]}>
+                                {isProcessing ? '...' : '→'}
+                            </Text>
+                        </TouchableOpacity>
+                    </View>
+                    
+                    {/* Quick Access Buttons */}
+                    <View style={styles.quickAccessRow}>
+                        <TouchableOpacity
+                            style={[styles.quickButton, { borderColor: currentTheme.border }]}
+                            onPress={() => executeQuickCommand(isScanning ? 'stop' : 'scan')}
+                        >
+                            <Text style={[styles.quickButtonText, { color: currentTheme.text }]}>
+                                {isScanning ? 'STOP' : 'SCAN'}
+                            </Text>
+                        </TouchableOpacity>
+                        
+                        <TouchableOpacity
+                            style={[styles.quickButton, { borderColor: currentTheme.border }]}
+                            onPress={() => executeQuickCommand(isAdvertising ? 'stop' : 'beacon')}
+                        >
+                            <Text style={[styles.quickButtonText, { color: currentTheme.text }]}>
+                                {isAdvertising ? 'STOP' : 'BEACON'}
+                            </Text>
+                        </TouchableOpacity>
+                        
+                        <TouchableOpacity
+                            style={[styles.quickButton, { borderColor: currentTheme.border }]}
+                            onPress={() => executeQuickCommand('nodes')}
+                        >
+                            <Text style={[styles.quickButtonText, { color: currentTheme.text }]}>
+                                NODES
+                            </Text>
+                        </TouchableOpacity>
+                        
+                        <TouchableOpacity
+                            style={[styles.quickButton, { borderColor: currentTheme.border }]}
+                            onPress={() => executeQuickCommand('help')}
+                        >
+                            <Text style={[styles.quickButtonText, { color: currentTheme.text }]}>
+                                HELP
+                            </Text>
+                        </TouchableOpacity>
+                    </View>
                 </View>
             </Animated.View>
         </KeyboardAvoidingView>
@@ -421,7 +425,6 @@ const TerminalScreen: React.FC = () => {
 const styles = StyleSheet.create({
     container: {
         flex: 1,
-        backgroundColor: '#000000',
     },
     mainContainer: {
         flex: 1,
@@ -429,275 +432,247 @@ const styles = StyleSheet.create({
 
     // Header
     header: {
+        paddingTop: 15,
+        paddingHorizontal: 20,
+        paddingBottom: 10,
+        elevation: 2,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
+    },
+    headerTop: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        paddingHorizontal: 15,
-        paddingVertical: 10,
-        backgroundColor: '#0A0A0A',
-        borderBottomWidth: 1,
-        borderBottomColor: '#1a1a1a',
-    },
-    headerLeft: {
-        flexDirection: 'row',
-        alignItems: 'center',
+        marginBottom: 15,
     },
     headerTitle: {
-        color: '#00FF00',
-        fontSize: 14,
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        letterSpacing: 2,
+        fontSize: 16,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
+        letterSpacing: 3,
     },
-    statusDot: {
+    statusIndicator: {
         width: 8,
         height: 8,
         borderRadius: 4,
-        marginLeft: 10,
-    },
-    menuButton: {
-        padding: 5,
-    },
-    menuIcon: {
-        color: '#00FF00',
-        fontSize: 20,
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
     },
 
-    // Quick Actions Panel
-    quickActionsPanel: {
-        backgroundColor: '#0A0A0A',
+    // Stats Bar
+    statsBar: {
+        flexDirection: 'row',
+        paddingVertical: 10,
+    },
+    statItem: {
+        flex: 1,
+        alignItems: 'center',
+    },
+    statLabel: {
+        fontSize: 9,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        letterSpacing: 1.5,
+        marginBottom: 4,
+    },
+    statValue: {
+        fontSize: 14,
+        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+        fontWeight: '400',
+    },
+    statDivider: {
+        width: 1,
+        height: 30,
+        marginHorizontal: 20,
+    },
+
+    // View Toggle
+    viewToggle: {
+        flexDirection: 'row',
+        paddingHorizontal: 20,
+        paddingVertical: 10,
+    },
+    toggleButton: {
+        flex: 1,
+        paddingVertical: 10,
+        alignItems: 'center',
+        marginHorizontal: 5,
+    },
+    toggleText: {
+        fontSize: 11,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        letterSpacing: 2,
+    },
+
+    // Search Bar
+    searchBar: {
+        paddingHorizontal: 20,
+        paddingVertical: 10,
+    },
+    searchInput: {
+        fontSize: 14,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
         paddingVertical: 10,
         paddingHorizontal: 15,
-        borderBottomWidth: 1,
-        borderBottomColor: '#1a1a1a',
+        borderRadius: 0,
+        borderWidth: 1,
+        borderColor: 'rgba(0,0,0,0.1)',
     },
-    quickActionsRow: {
+
+    // Content Area
+    contentArea: {
+        flex: 1,
+    },
+    contentContainer: {
+        padding: 20,
+    },
+
+    // Command Cards
+    commandCard: {
+        marginBottom: 15,
+        padding: 15,
+        borderRadius: 0,
+    },
+    commandHeader: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 10,
+    },
+    commandText: {
+        fontSize: 13,
+        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+        fontWeight: '600',
+    },
+    timestamp: {
+        fontSize: 10,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
+    },
+    responseDivider: {
+        height: 1,
+        marginVertical: 10,
+    },
+    responseText: {
+        fontSize: 12,
+        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+        lineHeight: 18,
+    },
+
+    // Quick Commands Grid
+    quickCommandsGrid: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        justifyContent: 'space-between',
+    },
+    quickCommandCard: {
+        width: '48%',
+        flexDirection: 'row',
+        alignItems: 'center',
+        padding: 15,
+        marginBottom: 15,
+        borderWidth: 1,
+    },
+    quickIcon: {
+        fontSize: 20,
+        marginRight: 12,
+    },
+    quickCommandInfo: {
+        flex: 1,
+    },
+    quickLabel: {
+        fontSize: 12,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        letterSpacing: 1,
+        marginBottom: 3,
+    },
+    quickDescription: {
+        fontSize: 10,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
+    },
+
+    // Empty State
+    emptyState: {
+        flex: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingVertical: 60,
+    },
+    emptyIcon: {
+        fontSize: 48,
+        marginBottom: 20,
+    },
+    emptyText: {
+        fontSize: 14,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
+        marginBottom: 8,
+    },
+    emptySubtext: {
+        fontSize: 12,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
+    },
+
+    // Input Area
+    inputArea: {
+        paddingHorizontal: 20,
+        paddingVertical: 15,
+        elevation: 8,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: -2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
+    },
+    inputContainer: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        borderWidth: 1,
+        marginBottom: 10,
+    },
+    commandInput: {
+        flex: 1,
+        fontSize: 14,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '300',
+        paddingVertical: 12,
+        paddingHorizontal: 15,
+    },
+    sendButton: {
+        paddingHorizontal: 20,
+        paddingVertical: 12,
+    },
+    sendButtonDisabled: {
+        opacity: 0.3,
+    },
+    sendButtonText: {
+        fontSize: 18,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '400',
+    },
+
+    // Quick Access
+    quickAccessRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
     },
-    quickActionBtn: {
+    quickButton: {
         flex: 1,
-        marginHorizontal: 3,
-        paddingVertical: 8,
-        backgroundColor: '#111111',
-        borderWidth: 1,
-        borderColor: '#1a1a1a',
+        paddingVertical: 10,
         alignItems: 'center',
+        marginHorizontal: 5,
+        borderWidth: 1,
     },
-    activeBtn: {
-        backgroundColor: '#001100',
-        borderColor: '#00FF00',
-    },
-    quickActionText: {
-        color: '#00FF00',
+    quickButtonText: {
         fontSize: 10,
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        letterSpacing: 1,
-    },
-
-    // Status Bar
-    statusBar: {
-        flexDirection: 'row',
-        backgroundColor: '#050505',
-        paddingVertical: 8,
-        paddingHorizontal: 15,
-        borderBottomWidth: 1,
-        borderBottomColor: '#1a1a1a',
-    },
-    statusItem: {
-        flex: 1,
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-    },
-    statusLabel: {
-        color: '#666666',
-        fontSize: 9,
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        marginRight: 5,
-        letterSpacing: 1,
-    },
-    statusValue: {
-        color: '#00FF00',
-        fontSize: 11,
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-    },
-    statusDivider: {
-        width: 1,
-        height: 12,
-        backgroundColor: '#1a1a1a',
-        marginHorizontal: 10,
-    },
-
-    // Terminal Output
-    terminalOutput: {
-        flex: 1,
-        backgroundColor: '#000000',
-    },
-    terminalContent: {
-        padding: 15,
-        paddingBottom: 20,
-    },
-    terminalText: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 11,
-        lineHeight: 16,
-        marginBottom: 2,
-        opacity: 0.9,
-    },
-    inputText: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 11,
-        lineHeight: 16,
-        marginBottom: 2,
-        opacity: 1,
-    },
-    errorText: {
-        color: '#FF3333',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 11,
-        lineHeight: 16,
-        marginBottom: 2,
-        opacity: 1,
-    },
-    successText: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 11,
-        lineHeight: 16,
-        marginBottom: 2,
-        opacity: 1,
-    },
-    warningText: {
-        color: '#FFAA00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 11,
-        lineHeight: 16,
-        marginBottom: 2,
-        opacity: 1,
-    },
-    systemText: {
-        color: '#666666',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 11,
-        lineHeight: 16,
-        marginBottom: 2,
-        opacity: 1,
-    },
-
-    // Current Line
-    currentLine: {
-        flexDirection: 'row',
-        marginTop: 5,
-    },
-    prompt: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        fontSize: 11,
-    },
-    currentInput: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 11,
-        flex: 1,
-    },
-    cursor: {
-        color: '#00FF00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 11,
-        opacity: 0.8,
-    },
-    processingIndicator: {
-        color: '#FFAA00',
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        fontSize: 11,
-    },
-
-    // Hidden Input
-    hiddenInput: {
-        position: 'absolute',
-        left: -1000,
-        width: 1,
-        height: 1,
-    },
-
-    // Input Bar
-    inputBar: {
-        flexDirection: 'row',
-        backgroundColor: '#0A0A0A',
-        paddingVertical: 8,
-        paddingHorizontal: 10,
-        borderTopWidth: 1,
-        borderTopColor: '#1a1a1a',
-    },
-    inputButton: {
-        width: 35,
-        height: 35,
-        justifyContent: 'center',
-        alignItems: 'center',
-        backgroundColor: '#111111',
-        marginRight: 8,
-        borderWidth: 1,
-        borderColor: '#1a1a1a',
-    },
-    inputButtonText: {
-        color: '#00FF00',
-        fontSize: 16,
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    },
-    helpButton: {
-        width: 35,
-        height: 35,
-        justifyContent: 'center',
-        alignItems: 'center',
-        backgroundColor: '#111111',
-        marginRight: 8,
-        borderWidth: 1,
-        borderColor: '#1a1a1a',
-    },
-    helpButtonText: {
-        color: '#00FF00',
-        fontSize: 14,
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-    },
-    clearButton: {
-        paddingHorizontal: 15,
-        height: 35,
-        justifyContent: 'center',
-        alignItems: 'center',
-        backgroundColor: '#111111',
-        marginRight: 8,
-        borderWidth: 1,
-        borderColor: '#1a1a1a',
-    },
-    clearButtonText: {
-        color: '#666666',
-        fontSize: 10,
-        fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-        letterSpacing: 1,
-    },
-    executeButton: {
-        flex: 1,
-        height: 35,
-        justifyContent: 'center',
-        alignItems: 'center',
-        backgroundColor: '#001100',
-        borderWidth: 1,
-        borderColor: '#00FF00',
-        marginLeft: 'auto',
-    },
-    executeButtonDisabled: {
-        backgroundColor: '#0A0A0A',
-        borderColor: '#1a1a1a',
-    },
-    executeButtonText: {
-        color: '#00FF00',
-        fontSize: 12,
-        fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-        letterSpacing: 2,
+        fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+        fontWeight: '500',
+        letterSpacing: 1.5,
     },
 });
 
-export default TerminalScreen;
+export default TerminalScreen

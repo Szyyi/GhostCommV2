@@ -107,7 +107,7 @@ import { VerificationMethod, BLEErrorCode } from './ble/types';
 import { ConnectionState, CryptoError, DeviceType, MessagePriority, NodeCapability, VerificationStatus } from './types/crypto';
 
 // Re-export BLE enums
-export { VerificationMethod, BLEErrorCode } from './ble/types';
+export { VerificationMethod, BLEErrorCode, BLE_SECURITY_CONFIG } from './ble/types';
 
 // Export BLE types
 export type {
@@ -121,6 +121,11 @@ export type {
     IdentityProof,
     PreKeyBundle as BLEPreKeyBundle,
     MeshAdvertisement,
+
+    // Scan types (moved here from scanner section)
+    ScanResult,
+    ScanFilter,
+    ScanConfig,
 
     // Event types
     BLEConnectionEvent,
@@ -161,14 +166,13 @@ export type {
 export { BLE_CONFIG } from './ble/types';
 
 // ============================================================================
-// SCANNER SPECIFIC EXPORTS
+// SCANNER SPECIFIC EXPORTS (Callbacks only, types are in BLE section)
 // ============================================================================
 
 export type {
-    ScanResult,
-    ScanFilter,
-    ScanConfig,
-    ScanCallback
+    ScanCallback,
+    DiscoveryCallback as ScanDiscoveryCallback,
+    VerificationCallback as ScanVerificationCallback
 } from './ble/scanner';
 
 // ============================================================================
@@ -185,6 +189,12 @@ export type {
 // ============================================================================
 // ADVERTISER SPECIFIC EXPORTS
 // ============================================================================
+
+// Export advertiser-specific types
+export type {
+    AdvertisementPacket,
+    CompactMeshInfo
+} from './ble/advertiser';
 
 // Export the static method for parsing advertisement packets
 export const parseAdvertisementPacket = BLEAdvertiser.parseAdvertisementPacket;
