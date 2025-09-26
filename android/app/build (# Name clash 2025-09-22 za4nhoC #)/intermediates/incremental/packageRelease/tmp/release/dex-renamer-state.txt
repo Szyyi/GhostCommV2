@@ -1,0 +1,4 @@
+#Sun Sep 21 23:32:28 BST 2025
+base.0=C\:\\Users\\szymo\\Desktop\\Programming\\GhostCommV2\\android\\app\\build\\intermediates\\dex\\release\\minifyReleaseWithR8\\classes.dex
+renamed.0=classes.dex
+path.0=classes.dex

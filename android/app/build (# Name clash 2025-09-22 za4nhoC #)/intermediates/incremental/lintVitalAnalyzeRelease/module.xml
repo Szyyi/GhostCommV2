@@ -1,0 +1,18 @@
+<lint-module
+    format="1"
+    dir="C:\Users\szymo\Desktop\Programming\GhostCommV2\android\app"
+    name=":app"
+    type="APP"
+    maven="GhostCommV2:app:"
+    agpVersion="8.1.1"
+    buildFolder="build"
+    bootClassPath="C:\Users\szymo\AppData\Local\Android\Sdk\platforms\android-34\android.jar;C:\Users\szymo\AppData\Local\Android\Sdk\build-tools\34.0.0\core-lambda-stubs.jar"
+    javaSourceLevel="17"
+    compileTarget="android-34">
+  <lintOptions
+      abortOnError="true"
+      absolutePaths="true"
+      checkReleaseBuilds="true"
+      explainIssues="true"/>
+  <variant name="release"/>
+</lint-module>
