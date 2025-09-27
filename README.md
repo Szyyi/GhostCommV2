@@ -1,5 +1,8 @@
 #  GhostComm
 
+<img width="1024" height="500" alt="feature-graphic" src="https://github.com/user-attachments/assets/3716aa97-bafa-40b4-be27-f67b1c17773b" />
+
+
 **Military-Grade Serverless P2P Messaging Over Bluetooth Mesh Networks**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
