@@ -42,6 +42,7 @@
         android:allowBackup="false"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false"
+        tools:replace="android:usesCleartextTraffic"
         tools:targetApi="28">
         
         <!-- Main Activity -->
@@ -57,20 +58,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        
-        <!-- Optional: Background BLE Service - Comment out if not implemented yet -->
-        <!-- 
-        <service
-            android:name=".ble.GhostCommBLEService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice"
-            tools:targetApi="29">
-            <intent-filter>
-                <action android:name="com.ghostcommv2.BLE_SERVICE" />
-            </intent-filter>
-        </service>
-        -->
         
     </application>
 </manifest>

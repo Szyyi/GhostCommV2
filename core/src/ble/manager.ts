@@ -728,6 +728,8 @@ export abstract class BLEManager {
      */
     private setupEventHandlers(): void {
         // Node discovery with verification
+        // Handles both discovery and verification events, emitting to appropriate callbacks, and
+        // processing verification results to update node trust state.
         this.scanner.onNodeDiscovery(async (event) => {
             if (event.type === 'node_discovered') {
                 await this.handleNodeDiscovered(event.node, event.advertisement!);
@@ -839,20 +841,26 @@ export abstract class BLEManager {
      */
     async start(): Promise<void> {
         if (this.state.isScanning || this.state.isAdvertising) {
-            console.log('⚠️ BLE mesh network already started');
+            console.log(' BLE mesh network already started');
             return;
         }
 
-        console.log(`🚀 Starting secure BLE mesh network (Protocol v${BLE_SECURITY_CONFIG.PROTOCOL_VERSION}) for node: ${this.keyPair.getFingerprint()}`);
+        console.log(` Starting secure BLE mesh network (Protocol v${BLE_SECURITY_CONFIG.PROTOCOL_VERSION}) for node: ${this.keyPair.getFingerprint()}`);
 
         try {
             // Generate pre-keys for async key exchange
+            // Pre-keys enable efficient session establishment without prior interaction
+            // This is critical for mobile and intermittent connectivity scenarios
             const preKeys = this.keyPair.generatePreKeys(10);
 
             // Create secure advertisement with identity proof
+            // Advertisement includes full public key and pre-key bundle for Protocol v2 
+            // compliance and efficient verification by peers, enhancing security and usability
             const advertisementData = await this.createSecureAdvertisement(preKeys);
 
             // Start advertising and scanning with rate limiting
+            // Parallelize operations to minimize startup time and ensure rapid network presence, 
+            // while enforcing rate limits to protect device resources, especially battery life
             await Promise.all([
                 this.startAdvertisingWithRateLimit(advertisementData),
                 this.startScanningWithRateLimit()
@@ -865,12 +873,14 @@ export abstract class BLEManager {
             this.startMeshProcessing();
 
             // Start address rotation for privacy
+            // Regularly changes BLE MAC address to prevent long-term tracking,
+            // balancing privacy with connectivity by coordinating with advertising schedule
             this.startAddressRotation();
 
-            console.log('✅ Secure BLE mesh network started successfully (Protocol v2)');
+            console.log(' Secure BLE mesh network started successfully (Protocol v2)');
 
         } catch (error) {
-            console.error('❌ Failed to start BLE mesh network:', error);
+            console.error(' Failed to start BLE mesh network:', error);
             await this.stop();
             throw error;
         }
@@ -884,13 +894,25 @@ export abstract class BLEManager {
         const nonce = this.generateNonce();
         const identityPublicKey = this.keyPair.getIdentityPublicKey();
 
-        // Create identity proof with full public key (Protocol v2)
+        // Creates identity proof with full public key (Protocol v2)
+        // Proof includes timestamp and nonce for replay protection
+        // Signature covers full proof data to ensure authenticity and integrity
         const proofData = new TextEncoder().encode(
             `${this.keyPair.getFingerprint()}-${timestamp}-${nonce}`
         );
         const signature = this.keyPair.signMessage(proofData);
 
         // Create pre-key bundle
+        // Bundle includes identity key, signed pre-key, and one-time pre-keys
+        // Enables efficient X3DH-style key exchange for session establishment
+        // Improves usability by allowing peers to initiate sessions without prior contact
+        // Only a subset of pre-keys are included to balance security and advertisement size
+        // This is critical for mobile scenarios where connections may be intermittent
+        // and prior key exchange is not feasible
+        // Pre-keys are rotated periodically to maintain security
+        // and prevent key compromise over time
+        // The signed pre-key provides authenticity for the bundle
+        // while one-time pre-keys enhance forward secrecy
         const preKeyBundle: PreKeyBundle = {
             identityKey: this.bytesToHex(identityPublicKey),
             signedPreKey: {
@@ -1037,29 +1059,29 @@ export abstract class BLEManager {
             throw new Error('BLE mesh network not started');
         }
 
-        // Check protocol version compatibility
+        // Checks protocol version compatibility
         const recipientNode = this.state.discoveredNodes.get(recipientId);
         if (recipientNode && recipientNode.protocolVersion < BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
             throw new Error(`Recipient ${recipientId} uses incompatible protocol version ${recipientNode.protocolVersion}`);
         }
 
-        // Rate limiting
+        // Rates limiting - Actually added lol to prevent abuse
         if (!this.checkRateLimit(recipientId, 'message')) {
             throw new Error('Rate limit exceeded');
         }
 
-        console.log(`📤 Sending secure message to ${recipientId} (Protocol v2)`);
+        console.log(` Sending secure message to ${recipientId} (Protocol v2)`);
 
-        // Get or establish session
+        // Gets or establish session
         const session = await this.getOrEstablishSession(recipientId);
         if (!session) {
             throw new Error(`Failed to establish session with ${recipientId}`);
         }
 
-        // Get message chain state
+        // Gets message chain state
         const chainState = this.getOrCreateMessageChain(recipientId);
 
-        // Create message with header including chain info
+        // Creates message with header including chain info
         const header: MessageHeader = {
             version: BLE_SECURITY_CONFIG.PROTOCOL_VERSION,
             messageId: this.encryption.generateMessageId(),
@@ -1081,21 +1103,21 @@ export abstract class BLEManager {
             payload: content
         };
 
-        // Encrypt with session
+        // Encrypts with session
         const encryptedMessage = await this.encryption.encryptWithSession(
             plaintextMessage,
             session.sessionKeys
         );
 
-        // Calculate message hash for chain
+        // Calculates message hash for chain
         const messageHash = await this.calculateMessageHash(encryptedMessage);
         chainState.lastSentHash = messageHash;
 
-        // Update session with chain state
+        // Updates session with chain state
         session.lastSentMessageHash = messageHash;
         session.sentSequenceNumber = chainState.sentSequence;
 
-        // Create BLE message with Protocol v2 fields
+        // Creates BLE message with Protocol v2 fields
         const bleMessage = await this.createBLEMessage(
             encryptedMessage,
             priority,
@@ -1103,13 +1125,13 @@ export abstract class BLEManager {
             chainState.lastSentHash
         );
 
-        // Try direct delivery first
+        // Tries direct delivery first
         if (await this.tryDirectDelivery(recipientId, bleMessage)) {
             this.statistics.messagesSent++;
             return bleMessage.messageId;
         }
 
-        // Queue for mesh routing
+        // Queues for mesh routing
         this.queueForMeshDelivery(bleMessage, recipientId);
         return bleMessage.messageId;
     }
@@ -1126,7 +1148,7 @@ export abstract class BLEManager {
         const payload = JSON.stringify(encryptedMessage);
         const shouldFragment = payload.length > BLE_CONFIG.FRAGMENT_SIZE;
 
-        // Sign the message
+        // Signs the message
         const messageSignature = this.keyPair.signMessage(
             new TextEncoder().encode(messageHash)
         );
@@ -1266,11 +1288,11 @@ export abstract class BLEManager {
         fromNodeId: string
     ): Promise<void> {
         try {
-            console.log(`📥 Processing message ${bleMessage.messageId} from ${fromNodeId} (Protocol v${bleMessage.version})`);
+            console.log(` Processing message ${bleMessage.messageId} from ${fromNodeId} (Protocol v${bleMessage.version})`);
 
             // Check protocol version
             if (bleMessage.version !== BLE_SECURITY_CONFIG.PROTOCOL_VERSION) {
-                console.warn(`⚠️ Protocol version mismatch: expected ${BLE_SECURITY_CONFIG.PROTOCOL_VERSION}, got ${bleMessage.version}`);
+                console.warn(` Protocol version mismatch: expected ${BLE_SECURITY_CONFIG.PROTOCOL_VERSION}, got ${bleMessage.version}`);
                 if (BLE_SECURITY_CONFIG.REQUIRE_SIGNATURE_VERIFICATION) {
                     this.emitSignatureVerificationFailure(bleMessage, fromNodeId, 'Protocol version mismatch');
                     return;
@@ -1280,53 +1302,53 @@ export abstract class BLEManager {
             // Protocol v2: Verify signature FIRST
             const verificationResult = await this.verifyMessageSignature(bleMessage, fromNodeId);
             if (!verificationResult.verified) {
-                console.error(`❌ Signature verification failed: ${verificationResult.error}`);
+                console.error(` Signature verification failed: ${verificationResult.error}`);
                 this.emitSignatureVerificationFailure(bleMessage, fromNodeId, verificationResult.error!);
                 return;
             }
 
-            // Check replay protection
+            // Checks replay protection
             if (this.isReplay(bleMessage.messageId)) {
-                console.warn(`⚠️ Replay detected: ${bleMessage.messageId}`);
+                console.warn(` Replay detected: ${bleMessage.messageId}`);
                 this.statistics.replaysDetected++;
                 return;
             }
 
-            // Check TTL
+            // Checks TTL
             if (Date.now() > bleMessage.expiresAt) {
-                console.log(`⏰ Message expired: ${bleMessage.messageId}`);
+                console.log(` Message expired: ${bleMessage.messageId}`);
                 this.statistics.messagesDropped++;
                 return;
             }
 
-            // Verify message chain if we have history with this node
+            // Verifies message chain if we have history with this node
             const chainState = this.messageChains.get(fromNodeId);
             if (chainState && BLE_SECURITY_CONFIG.REQUIRE_MESSAGE_CHAINING) {
                 if (!this.verifyMessageChain(bleMessage, chainState)) {
-                    console.error(`❌ Message chain verification failed`);
+                    console.error(` Message chain verification failed`);
                     this.emitSignatureVerificationFailure(bleMessage, fromNodeId, 'Invalid message chain');
                     return;
                 }
             }
 
-            // Handle fragments
+            // Handles fragments
             if (bleMessage.fragment) {
                 const fragmentResult = await this.handleFragment(bleMessage);
                 if (!fragmentResult) return; // Waiting for more fragments
                 bleMessage = fragmentResult;
             }
 
-            // Get routing decision
+            // Gets routing decision
             const routingDecision = this.meshNetwork.handleIncomingMessage(bleMessage, fromNodeId);
 
-            // Try to decrypt if it might be for us
+            // Tries to decrypt if it might be for us
             const decrypted = await this.tryDecryptMessage(bleMessage, fromNodeId);
 
             if (decrypted) {
                 // Message is for us
-                console.log(`🔓 Message decrypted: ${decrypted.payload.substring(0, 50)}...`);
+                console.log(` Message decrypted: ${decrypted.payload.substring(0, 50)}...`);
 
-                // Update message chain
+                // Updates message chain
                 if (chainState) {
                     chainState.lastReceivedHash = bleMessage.messageHash;
                     chainState.receivedSequence = bleMessage.sequenceNumber;
@@ -1348,7 +1370,7 @@ export abstract class BLEManager {
                     }
                 }
 
-                // Emit event with verification result
+                // Emits event with verification result
                 this.emitEvent({
                     type: 'message_received',
                     message: bleMessage,
@@ -1362,14 +1384,14 @@ export abstract class BLEManager {
                 // Forward through mesh
                 await this.relayMessage(bleMessage, fromNodeId);
             } else {
-                console.log(`📨 Message not for us and not forwarding`);
+                console.log(` Message not for us and not forwarding`);
             }
 
-            // Add to replay protection
+            // Adds to replay protection
             this.addReplayProtection(bleMessage.messageId);
 
         } catch (error) {
-            console.error('❌ Error handling message:', error);
+            console.error(' Error handling message:', error);
             this.statistics.messagesDropped++;
         }
     }
@@ -1461,7 +1483,7 @@ export abstract class BLEManager {
             };
         }
 
-        // Get sender's public key from message
+        // Gets sender's public key from message
         const senderPublicKey = this.hexToBytes(message.senderPublicKey);
 
         // Verify the key matches the sender ID
@@ -1503,14 +1525,14 @@ export abstract class BLEManager {
         if (BLE_SECURITY_CONFIG.REQUIRE_SEQUENCE_NUMBERS) {
             const sequenceGap = message.sequenceNumber - chainState.receivedSequence;
             if (sequenceGap > BLE_SECURITY_CONFIG.MAX_SEQUENCE_NUMBER_GAP) {
-                console.warn(`⚠️ Sequence number gap too large: ${sequenceGap}`);
+                console.warn(` Sequence number gap too large: ${sequenceGap}`);
                 return false;
             }
         }
 
-        // Check message chain hash
+        // Checks message chain hash
         if (message.previousMessageHash !== chainState.lastReceivedHash) {
-            console.warn(`⚠️ Message chain broken: expected ${chainState.lastReceivedHash}, got ${message.previousMessageHash}`);
+            console.warn(` Message chain broken: expected ${chainState.lastReceivedHash}, got ${message.previousMessageHash}`);
             return false;
         }
 
@@ -1518,7 +1540,7 @@ export abstract class BLEManager {
     }
 
     /**
-     * Get or create message chain tracking for a peer
+     * Gets or create message chain tracking for a peer
      */
     private getOrCreateMessageChain(peerId: string) {
         let chain = this.messageChains.get(peerId);
@@ -1535,7 +1557,7 @@ export abstract class BLEManager {
     }
 
     /**
-     * Calculate message hash for chaining
+     * Calculates message hash for chaining
      */
     private async calculateMessageHash(message: EncryptedMessage): Promise<string> {
         const messageData = JSON.stringify(message);
@@ -1546,7 +1568,7 @@ export abstract class BLEManager {
     }
 
     /**
-     * Calculate fingerprint from public key
+     * Calculates fingerprint from public key
      */
     private async calculateFingerprint(publicKey: Uint8Array): Promise<string> {
         const hashBuffer = await crypto.subtle.digest('SHA-256', publicKey);
@@ -1554,7 +1576,7 @@ export abstract class BLEManager {
     }
 
     /**
-     * Emit signature verification failure event
+     * Emits signature verification failure event
      */
     private emitSignatureVerificationFailure(
         message: BLEMessage,
@@ -1575,7 +1597,7 @@ export abstract class BLEManager {
     }
 
     /**
-     * Perform Protocol v2 handshake
+     * Performs Protocol v2 handshake
      */
     private async performProtocolHandshake(node: BLENode): Promise<boolean> {
         const handshake: ProtocolHandshake = {
@@ -1796,14 +1818,12 @@ export abstract class BLEManager {
             lastUpdated: Date.now()
         };
     }
-
-    // ... [Keep all other existing methods from original file] ...
-
+    // blah blah blah ...   
     /**
      * Perform X3DH-like key exchange
      */
     private async performKeyExchange(node: BLENode): Promise<SessionKeys> {
-        console.log(`🔐 Performing key exchange with ${node.id}`);
+        console.log(` Performing key exchange with ${node.id}`);
 
         // Use pre-keys if available
         const recipientPreKey = node.preKeys?.[0];
@@ -1826,7 +1846,7 @@ export abstract class BLEManager {
     ): Promise<PlaintextMessage | null> {
         const encryptedMessage = bleMessage.encryptedPayload;
 
-        // Try session decryption if we have a session
+        // Try a session decryption if we have a session
         const session = this.sessions.get(fromNodeId);
         if (session && session.state === ConnectionState.AUTHENTICATED) {
             try {
@@ -1843,7 +1863,7 @@ export abstract class BLEManager {
         try {
             return await this.encryption.decryptMessage(encryptedMessage, this.keyPair);
         } catch {
-            // Not for us
+            // Not for us, try next method
         }
 
         // Try broadcast decryption
@@ -1856,7 +1876,7 @@ export abstract class BLEManager {
                 );
             }
         } catch {
-            // Not a broadcast for us
+            // Not a broadcast for us, give up like I do
         }
 
         return null;
@@ -1869,7 +1889,7 @@ export abstract class BLEManager {
         bleMessage: BLEMessage,
         excludeNodeId: string
     ): Promise<void> {
-        console.log(`🔄 Relaying message ${bleMessage.messageId}`);
+        console.log(` Relaying message ${bleMessage.messageId}`);
 
         // Add our signature to relay path
         const relaySignature: RelaySignature = {
@@ -1890,7 +1910,7 @@ export abstract class BLEManager {
 
         // Check max hops
         if (relayedMessage.hopCount >= relayedMessage.maxHops) {
-            console.log(`⛔ Max hops reached for ${bleMessage.messageId}`);
+            console.log(` Max hops reached for ${bleMessage.messageId}`);
             this.statistics.messagesDropped++;
             return;
         }
@@ -1903,7 +1923,6 @@ export abstract class BLEManager {
         }
     }
 
-    // ... [Include all remaining helper methods and utilities from original] ...
 
     // Keep all existing helper methods
     private startAdvertisingWithRateLimit(data: BLEAdvertisementData): Promise<void> {
@@ -2015,9 +2034,6 @@ export abstract class BLEManager {
             }
         }
     }
-
-    // ... [Include ALL remaining methods from original file] ...
-
     /**
      * Stop the BLE mesh network with comprehensive cleanup and security considerations
      * 
@@ -2103,10 +2119,10 @@ export abstract class BLEManager {
      * - Power management and resource conservation
      */
     async stop(): Promise<void> {
-        console.log('🛑 Stopping BLE mesh network...');
+        console.log(' Stopping BLE mesh network...');
 
         try {
-            // Stop timers
+            // Stop timers, processing loops
             this.stopMeshProcessing();
             this.stopAddressRotation();
             this.stopCleanupTimer();
@@ -2116,7 +2132,7 @@ export abstract class BLEManager {
                 await this.closeSession(nodeId, session);
             }
 
-            // Stop components
+            // Stop components, wait for all to finish oi oi 
             await Promise.all([
                 this.advertiser.stopAdvertising(),
                 this.scanner.stopScanning(),
@@ -2136,10 +2152,10 @@ export abstract class BLEManager {
             this.state.isAdvertising = false;
             this.state.isScanning = false;
 
-            console.log('✅ BLE mesh network stopped');
+            console.log(' BLE mesh network stopped');
 
         } catch (error) {
-            console.error('❌ Error stopping BLE mesh network:', error);
+            console.error(' Error stopping BLE mesh network:', error);
             throw error;
         }
     }
@@ -2160,6 +2176,14 @@ export abstract class BLEManager {
 
     private async tryDirectDelivery(nodeId: string, message: BLEMessage): Promise<boolean> {
     // Enhanced implementation with better error handling
+    // Validate inputs
+    if (!nodeId || !message) {
+        console.error('Invalid parameters for direct delivery');
+        return false;
+    }
+    // Check connection status
+    // Validate connection manager methods
+    // Attempt direct send/return false if not connected
     const connMgr = this.connectionManager;
     
     // Verify connection manager has the required methods
@@ -2171,7 +2195,7 @@ export abstract class BLEManager {
     if (connMgr.isConnectedTo(nodeId)) {
         try {
             await connMgr.sendMessage(nodeId, message);
-            console.log(`✅ Direct delivery successful to ${nodeId}`);
+            console.log(` Direct delivery successful to ${nodeId}`);
             return true;
         } catch (error) {
             console.error(`Direct delivery failed to ${nodeId}:`, error);
@@ -2189,6 +2213,13 @@ export abstract class BLEManager {
         excludeNodeId?: string
     ): Promise<{ sent: number; failed: number }> {
         // Enhanced implementation with validation
+        // Validate message
+        // Check connection manager methods
+        // Perform broadcast and return results
+        if (!message) {
+            console.error('Invalid message for broadcast');
+            return { sent: 0, failed: 0 };
+        }
         const connMgr = this.connectionManager;
         
         if (typeof connMgr.broadcastMessage !== 'function') {
@@ -2223,28 +2254,28 @@ export abstract class BLEManager {
         return true;
     }
     private handleNodeVerified(node: BLENode, result: VerificationResult): void {
-        console.log(`✅ Node ${node.id} verified`);
+        console.log(` Node ${node.id} verified`);
     }
     private async handleNodeConnected(nodeId: string, connectionId: string): Promise<void> {
-        console.log(`🔗 Node connected: ${nodeId}`);
+        console.log(` Node connected: ${nodeId}`);
         this.statistics.totalConnections++;
         this.statistics.activeConnections++;
     }
     private async handleNodeAuthenticated(nodeId: string, session: BLESession): Promise<void> {
-        console.log(`🔐 Node authenticated: ${nodeId}`);
+        console.log(` Node authenticated: ${nodeId}`);
         this.sessions.set(nodeId, session);
     }
     private handleSessionEstablished(nodeId: string, session: BLESession): void {
-        console.log(`🤝 Session established: ${nodeId}`);
+        console.log(` Session established: ${nodeId}`);
         this.sessions.set(nodeId, session);
     }
     private handleNodeDisconnected(nodeId: string): void {
-        console.log(`🔌 Node disconnected: ${nodeId}`);
+        console.log(` Node disconnected: ${nodeId}`);
         this.sessions.delete(nodeId);
         this.statistics.activeConnections--;
     }
     private handleConnectionError(nodeId: string, error: BLEError): void {
-        console.error(`❌ Connection error for ${nodeId}:`, error);
+        console.error(` Connection error for ${nodeId}:`, error);
         this.statistics.failedConnections++;
     }
     private async closeSession(nodeId: string, session: BLESession): Promise<void> {
@@ -2261,7 +2292,7 @@ export abstract class BLEManager {
                         .filter(n => n.isConnected)
                 );
             } catch (error) {
-                console.error('❌ Mesh processing error:', error);
+                console.error(' Mesh processing error:', error);
             }
         }, 5000);
     }
@@ -2273,7 +2304,7 @@ export abstract class BLEManager {
     }
     private startAddressRotation(): void {
         this.addressRotationTimer = setInterval(() => {
-            console.log('🔄 Rotating BLE address for privacy');
+            console.log(' Rotating BLE address for privacy');
         }, BLE_CONFIG.ADDRESS_ROTATION_INTERVAL);
     }
     private stopAddressRotation(): void {
@@ -2300,7 +2331,7 @@ export abstract class BLEManager {
         for (const [nodeId, session] of this.sessions) {
             if (now - session.lastActivity > BLE_CONFIG.SESSION_LIFETIME) {
                 this.sessions.delete(nodeId);
-                console.log(`🗑️ Expired session for ${nodeId}`);
+                console.log(` Expired session for ${nodeId}`);
             }
         }
     }
@@ -2324,7 +2355,7 @@ export abstract class BLEManager {
             try {
                 callback(event);
             } catch (error) {
-                console.error('❌ Error in event callback:', error);
+                console.error(' Error in event callback:', error);
             }
         }
     }
@@ -2416,18 +2447,18 @@ export abstract class BLEManager {
         node: BLENode,
         advertisement: BLEAdvertisementData
     ): Promise<void> {
-        console.log(`🔍 Discovered node: ${node.id} (Protocol v${advertisement.version})`);
+        console.log(` Discovered node: ${node.id} (Protocol v${advertisement.version})`);
 
         // Verify advertisement signature using public key from advertisement
         if (!await this.verifyAdvertisement(advertisement)) {
-            console.warn(`⚠️ Invalid advertisement signature from ${node.id}`);
+            console.warn(` Invalid advertisement signature from ${node.id}`);
             return;
         }
 
         // Check replay protection
         const adId = `${node.id}-${advertisement.sequenceNumber}`;
         if (this.replayProtection.has(adId)) {
-            console.warn(`⚠️ Replay detected from ${node.id}`);
+            console.warn(` Replay detected from ${node.id}`);
             this.statistics.replaysDetected++;
             return;
         }
@@ -2570,7 +2601,7 @@ export abstract class BLEManager {
             throw new Error('BLE mesh network not started');
         }
 
-        console.log('📢 Broadcasting secure message (Protocol v2)');
+        console.log(' Broadcasting secure message (Protocol v2)');
 
         const chainState = this.getOrCreateMessageChain('broadcast');
 
@@ -2612,7 +2643,7 @@ export abstract class BLEManager {
         const results = await this.broadcastToConnectedNodes(bleMessage);
 
         this.statistics.messagesSent += results.sent;
-        console.log(`📢 Broadcast sent to ${results.sent} nodes, ${results.failed} failed`);
+        console.log(` Broadcast sent to ${results.sent} nodes, ${results.failed} failed`);
 
         return bleMessage.messageId;
     }
@@ -2623,7 +2654,7 @@ export abstract class BLEManager {
         method: VerificationMethod,
         verificationData?: string
     ): Promise<VerificationResult> {
-        console.log(`🔐 Verifying node ${nodeId} using ${method}`);
+        console.log(` Verifying node ${nodeId} using ${method}`);
 
         const node = this.state.discoveredNodes.get(nodeId);
         if (!node) {

@@ -238,6 +238,7 @@ export class ReactNativeBLEScanner extends BLEScanner {
             };
         }
     }
+    
 
     /**
      * Process discovered device
@@ -324,7 +325,8 @@ export class ReactNativeBLEScanner extends BLEScanner {
     }
 
     /**
-     * Check if device is advertising GhostComm service
+     * Check if device is advertising GhostComm service via iBeacon
+     * Updated to detect iBeacon format used by react-native-ble-advertiser
      */
     private isGhostCommDevice(device: Device): boolean {
         // Priority 1: Service UUID match (most reliable)
@@ -334,28 +336,69 @@ export class ReactNativeBLEScanner extends BLEScanner {
             return true;
         }
         
-        // Priority 2: Service data contains our UUID
-        if (device.serviceData && BLE_CONFIG.SERVICE_UUID in device.serviceData) {
-            return true;
-        }
-        
-        // Priority 3: Manufacturer data with GhostComm ID
+        // Priority 2: Check if it's an iBeacon with our UUID
+        // The react-native-ble-advertiser broadcasts as iBeacon
         if (device.manufacturerData) {
             try {
                 const data = Buffer.from(device.manufacturerData, 'base64');
-                // Check for GhostComm manufacturer ID (0xFFFF for development)
+                
+                // iBeacon format check
+                // Byte 0-1: Company ID (0x004C for Apple, but we use 0xFFFF)
+                // Byte 2-3: Beacon type (0x0215 for iBeacon)
+                // Byte 4-19: Proximity UUID (16 bytes)
+                // Byte 20-21: Major
+                // Byte 22-23: Minor
+                // Byte 24: TX Power
+                
+                if (data.length >= 25) {
+                    // Check for iBeacon structure
+                    const companyId = (data[0] << 8) | data[1];
+                    const beaconType = (data[2] << 8) | data[3];
+                    
+                    // Standard iBeacon or our custom company ID
+                    if ((companyId === 0x004C && beaconType === 0x0215) || 
+                        companyId === 0xFFFF) {
+                        
+                        // Extract UUID from bytes 4-19
+                        const uuid = Array.from(data.slice(4, 20) as Uint8Array)
+                            .map(b => b.toString(16).padStart(2, '0'))
+                            .join('');
+                        
+                        // Format as standard UUID
+                        const formattedUuid = [
+                            uuid.slice(0, 8),
+                            uuid.slice(8, 12),
+                            uuid.slice(12, 16),
+                            uuid.slice(16, 20),
+                            uuid.slice(20, 32)
+                        ].join('-');
+                        
+                        // Check if it matches our service UUID
+                        if (formattedUuid.toLowerCase() === BLE_CONFIG.SERVICE_UUID.toLowerCase()) {
+                            console.log(`✅ Found GhostComm iBeacon: ${device.id}`);
+                            return true;
+                        }
+                    }
+                }
+                
+                // Fallback: Check for our test company ID
                 if (data.length >= 2 && data[0] === 0xFF && data[1] === 0xFF) {
                     return true;
                 }
-            } catch {
-                // Invalid manufacturer data
+            } catch (error) {
+                console.warn('⚠️ Error parsing manufacturer data:', error);
             }
+        }
+        
+        // Priority 3: Service data contains our UUID
+        if (device.serviceData && BLE_CONFIG.SERVICE_UUID in device.serviceData) {
+            return true;
         }
         
         // Priority 4: Name patterns (least reliable, for compatibility)
         if (device.name) {
             if (device.name.startsWith('GC_') ||     // GhostComm
-                device.name.startsWith('GM_') ||     // GhostMesh
+                device.name.startsWith('GM_') ||     // GhostMesh  
                 device.name.includes('Ghost')) {
                 return true;
             }
@@ -365,51 +408,93 @@ export class ReactNativeBLEScanner extends BLEScanner {
     }
 
     /**
-     * Extract Protocol v2.1 advertisement data (108-byte packet)
+     * Extract Protocol v2.1 data from iBeacon advertisement
      */
     private extractProtocolV21Data(device: Device): Uint8Array | null {
-        // Priority 1: Service data (most reliable on both platforms)
-        if (device.serviceData && BLE_CONFIG.SERVICE_UUID in device.serviceData) {
-            try {
-                const serviceData = device.serviceData[BLE_CONFIG.SERVICE_UUID];
-                const data = Buffer.from(serviceData, 'base64');
-                
-                // Validate Protocol v2.1 packet
-                if (this.isValidProtocolV21Packet(data)) {
-                    return new Uint8Array(data);
-                }
-            } catch (error) {
-                console.warn('⚠️ [RN-Scanner] Invalid service data:', error);
-            }
-        }
+        // For iBeacon format, we need to reconstruct the Protocol v2.1 packet
+        // from the major/minor values and any additional service data
         
-        // Priority 2: Manufacturer data (fallback for size constraints)
         if (device.manufacturerData) {
             try {
                 const data = Buffer.from(device.manufacturerData, 'base64');
                 
-                // Check for complete packet (2 bytes ID + 108 bytes packet)
-                if (data.length >= 110) {
-                    const packet = data.slice(2); // Skip manufacturer ID
-                    if (this.isValidProtocolV21Packet(packet)) {
-                        return new Uint8Array(packet);
-                    }
-                }
-                
-                // Try to reconstruct from partial data
-                if (data.length >= 20) {
-                    const reconstructed = this.reconstructProtocolV21Packet(data);
-                    if (reconstructed) {
-                        return reconstructed;
+                // Check for iBeacon format
+                if (data.length >= 25) {
+                    const companyId = (data[0] << 8) | data[1];
+                    
+                    // Check if it's an iBeacon (Apple or our custom)
+                    if (companyId === 0x004C || companyId === 0xFFFF) {
+                        // Extract major and minor values
+                        const major = (data[20] << 8) | data[21];
+                        const minor = (data[22] << 8) | data[23];
+                        
+                        console.log(`📡 Detected iBeacon: Major=${major}, Minor=${minor}`);
+                        
+                        // Create a minimal Protocol v2.1 packet from iBeacon data
+                        // This allows discovery even though full verification will fail
+                        return this.createPacketFromBeacon(device.id, major, minor);
                     }
                 }
             } catch (error) {
-                console.warn('⚠️ [RN-Scanner] Invalid manufacturer data:', error);
+                console.warn('⚠️ Error extracting iBeacon data:', error);
             }
         }
         
-        // Priority 3: Create minimal tracking packet (allows discovery without verification)
+        // Fallback to original implementation for non-iBeacon advertisements
         return this.createMinimalProtocolV21Packet(device);
+    }
+
+    /**
+     * Create Protocol v2.1 packet from iBeacon major/minor values
+     */
+    private createPacketFromBeacon(deviceId: string, major: number, minor: number): Uint8Array {
+        const packet = new Uint8Array(108);
+        const view = new DataView(packet.buffer);
+        let offset = 0;
+        
+        // Version - Protocol v2.1
+        packet[offset++] = 2;
+        
+        // Flags - basic capabilities
+        packet[offset++] = 0x01; // RELAY
+        
+        // Ephemeral ID (16 bytes) - derive from major/minor
+        const ephemeralId = new Uint8Array(16);
+        ephemeralId[0] = (major >> 8) & 0xFF;
+        ephemeralId[1] = major & 0xFF;
+        ephemeralId[2] = (minor >> 8) & 0xFF;
+        ephemeralId[3] = minor & 0xFF;
+        // Fill rest with device ID hash
+        const deviceBytes = new TextEncoder().encode(deviceId);
+        for (let i = 4; i < 16 && i - 4 < deviceBytes.length; i++) {
+            ephemeralId[i] = deviceBytes[i - 4];
+        }
+        packet.set(ephemeralId, offset);
+        offset += 16;
+        
+        // Identity hash (8 bytes) - derived from major/minor
+        view.setUint32(offset, major, false);
+        view.setUint32(offset + 4, minor, false);
+        offset += 8;
+        
+        // Sequence number
+        view.setUint32(offset, Date.now() & 0xFFFFFFFF, false);
+        offset += 4;
+        
+        // Timestamp
+        view.setUint32(offset, Math.floor(Date.now() / 1000), false);
+        offset += 4;
+        
+        // Signature (64 bytes) - empty (will fail verification but allows discovery)
+        offset += 64;
+        
+        // Mesh info
+        packet[offset++] = 1;   // nodeCount
+        packet[offset++] = 0;   // queueSize  
+        packet[offset++] = 100; // batteryLevel
+        packet[offset++] = 0;   // flags
+        
+        return packet;
     }
 
     /**
