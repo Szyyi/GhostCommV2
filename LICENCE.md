@@ -2,7 +2,7 @@
 
 Version 1.0, January 2025
 
-Copyright (c) 2025 LCpl Szymon 'Si' Procak. All rights reserved.
+Copyright (c) 2025 LCpl Szymon Procak. All rights reserved.
 
 ## Preamble
 
